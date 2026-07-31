@@ -3,12 +3,25 @@ from fastapi.responses import StreamingResponse
 
 from orkio_platform.api.dependencies import get_principal
 from orkio_platform.application.services import PlatformService
-from orkio_platform.domain.models import ChatRequest, PrincipalContext, ResponseEnvelope
+from orkio_platform.config import get_settings
+from orkio_platform.domain.models import (
+    CancelExecutionRequest,
+    ChatRequest,
+    PrincipalContext,
+    ResponseEnvelope,
+)
 from orkio_platform.infrastructure.repositories import repository
 from orkio_platform.realtime.sse import stream_chat
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
-service = PlatformService(repository)
+settings = get_settings()
+service = PlatformService(
+    repository,
+    execution_lease_seconds=settings.execution_lease_seconds,
+    execution_stale_after_seconds=(
+        settings.execution_stale_after_seconds
+    ),
+)
 
 
 @router.post("", response_model=ResponseEnvelope)
@@ -31,4 +44,20 @@ def chat_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post(
+    "/executions/{request_id}/cancel",
+    response_model=ResponseEnvelope,
+)
+def cancel_execution(
+    request_id: str,
+    payload: CancelExecutionRequest,
+    principal: PrincipalContext = Depends(get_principal),
+) -> ResponseEnvelope:
+    return service.cancel_execution(
+        principal,
+        request_id,
+        reason=payload.reason,
     )

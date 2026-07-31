@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from time import perf_counter
 
 from orkio_platform.application.services import PlatformService
-from orkio_platform.domain.models import ChatRequest, PrincipalContext, SSEEvent, new_id
+from orkio_platform.domain.errors import DomainError
+from orkio_platform.domain.models import (
+    ChatRequest,
+    PrincipalContext,
+    SSEEvent,
+    new_id,
+    utc_now,
+)
 
 
 def encode_event(event: SSEEvent) -> str:
@@ -14,7 +22,48 @@ def encode_event(event: SSEEvent) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"id: {event.event_id}\nevent: {event.event_type}\ndata: {payload}\n\n"
+    return (
+        f"id: {event.event_id}\n"
+        f"event: {event.event_type}\n"
+        f"data: {payload}\n\n"
+    )
+
+
+def encode_pre_context_event(
+    *,
+    event_id: str,
+    event_type: str,
+    request_id: str,
+    principal: PrincipalContext,
+    request: ChatRequest,
+    sequence: int,
+    payload: dict[str, object],
+) -> str:
+    body = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "request_id": request_id,
+        "execution_id": None,
+        "tenant_id": principal.tenant_id,
+        "thread_id": request.thread_id,
+        "agent_id": request.requested_agent,
+        "turn_owner": None,
+        "sequence": sequence,
+        "payload": payload,
+        "created_at": utc_now().isoformat(),
+        "context_status": "NOT_RESOLVED",
+    }
+    encoded = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"id: {event_id}\n"
+        f"event: {event_type}\n"
+        f"data: {encoded}\n\n"
+    )
 
 
 def stream_chat(
@@ -22,10 +71,79 @@ def stream_chat(
     principal: PrincipalContext,
     request: ChatRequest,
 ) -> Iterator[str]:
-    context = service.prepare_turn(principal, request)
+    started = perf_counter()
+    request_id = request.request_id or new_id("request")
+    effective_request = request.model_copy(
+        update={"request_id": request_id},
+    )
+    pre_context_sequence = 0
+
+    def emit_pre_context(
+        event_type: str,
+        payload: dict[str, object],
+    ) -> str:
+        nonlocal pre_context_sequence
+        pre_context_sequence += 1
+        return encode_pre_context_event(
+            event_id=f"{request_id}:pre:{pre_context_sequence}",
+            event_type=event_type,
+            request_id=request_id,
+            principal=principal,
+            request=effective_request,
+            sequence=pre_context_sequence,
+            payload=payload,
+        )
+
+    try:
+        context = service.prepare_turn(
+            principal,
+            effective_request,
+        )
+    except DomainError as exc:
+        yield emit_pre_context(
+            "error",
+            {
+                "code": exc.code,
+                "message": exc.message,
+                "phase": "prepare_turn",
+            },
+        )
+        yield emit_pre_context(
+            "done",
+            {
+                "outcome": "error",
+                "error_code": exc.code,
+                "phase": "prepare_turn",
+            },
+        )
+        return
+    except Exception:
+        yield emit_pre_context(
+            "error",
+            {
+                "code": "SSE_PRE_CONTEXT_EXCEPTION",
+                "message": (
+                    "The realtime context could not be resolved."
+                ),
+                "phase": "prepare_turn",
+            },
+        )
+        yield emit_pre_context(
+            "done",
+            {
+                "outcome": "error",
+                "error_code": "SSE_PRE_CONTEXT_EXCEPTION",
+                "phase": "prepare_turn",
+            },
+        )
+        return
+
     sequence = 0
 
-    def emit(event_type: str, payload: dict[str, object]) -> str:
+    def emit(
+        event_type: str,
+        payload: dict[str, object],
+    ) -> str:
         nonlocal sequence
         sequence += 1
         return encode_event(
@@ -43,38 +161,125 @@ def stream_chat(
         )
 
     try:
-        yield emit("status", {"status": "stream_open"})
+        context, execution, created = service.reserve_turn(
+            context,
+            effective_request,
+        )
+        yield emit(
+            "status",
+            {
+                "status": "stream_open",
+                "replayed": not created,
+            },
+        )
         yield emit(
             "execution",
             {
                 "request_id": context.request_id,
+                "execution_id": context.execution_id,
                 "route_family": context.route_family,
+                "replayed": not created,
             },
         )
         yield emit(
             "agent_started",
             {
                 "agent_id": context.turn_owner,
+                "display_name": context.display_agent,
                 "ownership_locked": context.ownership_locked,
+                "replayed": not created,
             },
         )
 
-        if request.simulate_error:
-            raise RuntimeError("controlled")
-
-        content = (
-            f"[{context.turn_owner}] Resposta SSE determinística para "
-            f"{context.tenant_id}."
+        response, replayed = service.execute_reserved_turn(
+            context,
+            execution,
+            effective_request,
+            created=created,
+            started=started,
         )
-        yield emit("agent_chunk", {"content": content, "chunk_index": 0})
+
+        if response.status == "cancelled":
+            yield emit(
+                "cancelled",
+                {
+                    "message": response.model_dump(mode="json"),
+                    "message_id": response.message_id,
+                    "replayed": replayed,
+                },
+            )
+            yield emit(
+                "done",
+                {
+                    "outcome": "cancelled",
+                    "message_id": response.message_id,
+                    "replayed": replayed,
+                },
+            )
+            return
+
+        if response.status == "error":
+            yield emit(
+                "error",
+                {
+                    **(response.error or {}),
+                    "message_id": response.message_id,
+                    "replayed": replayed,
+                },
+            )
+            yield emit(
+                "done",
+                {
+                    "outcome": "error",
+                    "error_code": (
+                        response.error or {}
+                    ).get("code", "EXECUTION_FAILED"),
+                    "message_id": response.message_id,
+                    "replayed": replayed,
+                },
+            )
+            return
+
+        yield emit(
+            "agent_chunk",
+            {
+                "content": response.content,
+                "chunk_index": 0,
+                "replayed": replayed,
+            },
+        )
         yield emit(
             "agent_done",
             {
-                "content_length": len(content),
+                "message": response.model_dump(mode="json"),
+                "content_length": len(response.content),
                 "agent_id": context.turn_owner,
+                "replayed": replayed,
             },
         )
-        yield emit("done", {"outcome": "success"})
+        yield emit(
+            "done",
+            {
+                "outcome": "success",
+                "message_id": response.message_id,
+                "replayed": replayed,
+            },
+        )
+    except DomainError as exc:
+        yield emit(
+            "error",
+            {
+                "code": exc.code,
+                "message": exc.message,
+            },
+        )
+        yield emit(
+            "done",
+            {
+                "outcome": "error",
+                "error_code": exc.code,
+            },
+        )
     except Exception:
         yield emit(
             "error",

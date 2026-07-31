@@ -1,6 +1,3 @@
-from __future__ import annotations
-
-
 class DomainError(Exception):
     def __init__(self, code: str, message: str, *, status_code: int = 400) -> None:
         super().__init__(message)
@@ -14,6 +11,11 @@ class NotFoundError(DomainError):
         super().__init__(code, message, status_code=404)
 
 
-class ForbiddenError(DomainError):
+class ConflictError(DomainError):
     def __init__(self, code: str, message: str) -> None:
-        super().__init__(code, message, status_code=403)
+        super().__init__(code, message, status_code=409)
+
+
+class ServiceUnavailableError(DomainError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(code, message, status_code=503)

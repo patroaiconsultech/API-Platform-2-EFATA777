@@ -15,9 +15,12 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
 
 
+ExecutionStatus = Literal["running", "success", "error", "cancelled"]
+RecoveryDecision = Literal["retry", "cancel", "abandon"]
+
+
 class PrincipalContext(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     tenant_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
     role: Literal["member", "admin", "auditor"] = "member"
@@ -25,7 +28,6 @@ class PrincipalContext(BaseModel):
 
 class Agent(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     agent_id: str
     display_name: str
     description: str
@@ -35,7 +37,6 @@ class Agent(BaseModel):
 
 class ThreadRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     thread_id: str
     tenant_id: str
     created_by: str
@@ -45,7 +46,6 @@ class ThreadRecord(BaseModel):
 
 class MessageRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     message_id: str
     thread_id: str
     tenant_id: str
@@ -57,13 +57,54 @@ class MessageRecord(BaseModel):
     display_name: str | None = None
     final_speaker: str | None = None
     turn_owner: str | None = None
+    request_id: str | None = None
     execution_id: str | None = None
+    route_family: str | None = None
+    status: Literal["success", "error", "cancelled"] | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ExecutionRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    tenant_id: str
+    request_id: str
+    execution_id: str
+    thread_id: str
+    user_id: str
+    requested_agent: str
+    resolved_agent: str
+    turn_owner: str
+    display_name: str
+    route_family: str
+    request_fingerprint_sha256: str
+    status: ExecutionStatus = "running"
+    lease_owner: str
+    lease_expires_at: datetime
+    heartbeat_at: datetime
+    error_code: str | None = None
+    error_message: str | None = None
+    user_message_id: str | None = None
+    assistant_message_id: str | None = None
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
+class RecoveryDecisionRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    tenant_id: str
+    decision_id: str
+    request_id: str
+    execution_id: str
+    actor_id: str
+    decision: RecoveryDecision
+    reason: str = Field(min_length=1, max_length=1000)
     created_at: datetime = Field(default_factory=utc_now)
 
 
 class AgentTurnContext(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     request_id: str
     execution_id: str
     thread_id: str
@@ -81,20 +122,13 @@ class AgentTurnContext(BaseModel):
 
     @model_validator(mode="after")
     def validate_locked_owner(self) -> "AgentTurnContext":
-        if self.ownership_locked:
-            identities = {
-                self.resolved_agent,
-                self.turn_owner,
-                self.display_agent,
-            }
-            if len(identities) != 1:
-                raise ValueError("AGENT_OWNERSHIP_DIVERGENCE")
+        if self.ownership_locked and self.resolved_agent != self.turn_owner:
+            raise ValueError("AGENT_OWNERSHIP_DIVERGENCE")
         return self
 
 
 class ResponseEnvelope(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     message_id: str
     request_id: str
     execution_id: str
@@ -115,14 +149,13 @@ class ResponseEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "ResponseEnvelope":
-        values = {
+        canonical = {
             self.agent_id,
             self.agent_name,
-            self.display_name,
             self.final_speaker,
             self.turn_owner,
         }
-        if len(values) != 1:
+        if len(canonical) != 1:
             raise ValueError("PERSISTENCE_AGENT_MISMATCH")
         return self
 
@@ -135,12 +168,25 @@ class ChatRequest(BaseModel):
     thread_id: str
     content: str = Field(min_length=1, max_length=100_000)
     requested_agent: str | None = None
+    request_id: str | None = None
     simulate_error: bool = False
+
+
+class CancelExecutionRequest(BaseModel):
+    reason: str = Field(
+        default="Cancelled by an authorized user.",
+        min_length=1,
+        max_length=1000,
+    )
+
+
+class RecoveryDecisionCreate(BaseModel):
+    decision: RecoveryDecision
+    reason: str = Field(min_length=1, max_length=1000)
 
 
 class SSEEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
-
     event_id: str
     event_type: str
     execution_id: str
