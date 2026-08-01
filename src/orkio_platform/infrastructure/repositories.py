@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
+import logging
 from datetime import datetime
 from threading import RLock
 
@@ -13,11 +15,17 @@ from orkio_platform.domain.models import (
     ThreadRecord,
     utc_now,
 )
-from orkio_platform.infrastructure.database import create_database_engine
+from orkio_platform.infrastructure.database import (
+    create_database_engine,
+    database_driver_descriptor,
+)
 from orkio_platform.infrastructure.repository_protocol import RepositoryProtocol
 from orkio_platform.infrastructure.sqlalchemy_repository import (
     SQLAlchemyRepository,
 )
+
+
+logger = logging.getLogger("orkio.database")
 
 
 class InMemoryRepository:
@@ -387,11 +395,34 @@ class InMemoryRepository:
 def build_repository() -> RepositoryProtocol:
     settings = get_settings()
     if settings.database_url:
+        descriptor = database_driver_descriptor(settings.database_url)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "database_driver_selected",
+                    **descriptor,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         engine = create_database_engine(
             settings.database_url,
             echo=settings.database_echo,
         )
         return SQLAlchemyRepository(engine)
+    logger.info(
+        json.dumps(
+            {
+                "event": "database_driver_selected",
+                "drivername": "memory",
+                "backend": "memory",
+                "driver": "memory",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
     return InMemoryRepository()
 
 

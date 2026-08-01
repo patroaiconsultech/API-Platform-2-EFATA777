@@ -10,7 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.pool import StaticPool
 
 metadata = MetaData()
@@ -141,12 +141,37 @@ Index(
 )
 
 
+def normalize_database_url(url: str) -> str:
+    normalized = url.strip()
+    if normalized.startswith("postgresql://"):
+        return (
+            "postgresql+psycopg://"
+            + normalized.removeprefix("postgresql://")
+        )
+    if normalized.startswith("postgres://"):
+        return (
+            "postgresql+psycopg://"
+            + normalized.removeprefix("postgres://")
+        )
+    return normalized
+
+
+def database_driver_descriptor(url: str) -> dict[str, str]:
+    parsed = make_url(normalize_database_url(url))
+    return {
+        "drivername": parsed.drivername,
+        "backend": parsed.get_backend_name(),
+        "driver": parsed.get_driver_name(),
+    }
+
+
 def create_database_engine(url: str, *, echo: bool = False) -> Engine:
+    normalized_url = normalize_database_url(url)
     kwargs: dict[str, object] = {
         "pool_pre_ping": True,
         "echo": echo,
     }
-    if url.startswith("sqlite") and ":memory:" in url:
+    if normalized_url.startswith("sqlite") and ":memory:" in normalized_url:
         kwargs["connect_args"] = {"check_same_thread": False}
         kwargs["poolclass"] = StaticPool
-    return create_engine(url, **kwargs)
+    return create_engine(normalized_url, **kwargs)
