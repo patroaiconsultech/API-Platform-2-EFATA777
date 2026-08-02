@@ -12,6 +12,10 @@ from orkio_platform.domain.models import (
     RecoveryDecisionRecord,
 )
 from orkio_platform.infrastructure.repositories import repository
+from orkio_platform.version import (
+    RELEASE_CANDIDATE,
+    RELEASE_VERSION,
+)
 
 router = APIRouter(prefix="/api/governance", tags=["governance"])
 settings = get_settings()
@@ -29,7 +33,9 @@ def governance_status(
     _: PrincipalContext = Depends(get_principal),
 ) -> dict[str, object]:
     return {
-        "candidate": "ORKIO-PLATFORM-2-RC1-PREMIUM-HARDENING-R0-3",
+        "candidate": RELEASE_CANDIDATE,
+        "release_version": RELEASE_VERSION,
+        "release_sha": settings.release_sha,
         "proposal_only": False,
         "local_execution": True,
         "repository_backend": repository.backend_name,
