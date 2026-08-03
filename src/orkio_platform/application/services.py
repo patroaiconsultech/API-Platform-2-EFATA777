@@ -49,6 +49,9 @@ from orkio_platform.infrastructure.repository_protocol import (
 from orkio_platform.observability.execution import log_execution_event
 from orkio_platform.orchestration.contracts import AgentContribution
 from orkio_platform.orchestration.router import build_orchestration_plan
+from orkio_platform.orchestration.output_normalization import (
+    normalize_agent_viewpoint,
+)
 
 
 class PlatformService:
@@ -438,7 +441,10 @@ class PlatformService:
         return AgentContribution(
             agent_id=agent.agent_id,
             display_name=agent.display_name,
-            content=result.content,
+            content=normalize_agent_viewpoint(
+                result.content,
+                agent.agent_id,
+            ),
             provider=result.provider,
             model=result.model,
             response_id=result.response_id,
@@ -485,7 +491,29 @@ class PlatformService:
                 contributions,
             )
         )
+        result = self._normalized_owner_result(context, result)
         return result, contributions
+
+    @staticmethod
+    def _normalized_owner_result(
+        context: AgentTurnContext,
+        owner_result: LLMResult,
+    ) -> LLMResult:
+        if context.interaction_mode != "roundtable":
+            return owner_result
+        normalized = normalize_agent_viewpoint(
+            owner_result.content,
+            context.turn_owner,
+        )
+        return LLMResult(
+            content=normalized,
+            provider=owner_result.provider,
+            model=owner_result.model,
+            response_id=owner_result.response_id,
+            input_tokens=owner_result.input_tokens,
+            output_tokens=owner_result.output_tokens,
+            total_tokens=owner_result.total_tokens,
+        )
 
     @staticmethod
     def _aggregate_token_usage(
@@ -529,6 +557,7 @@ class PlatformService:
                 "provider": item.provider,
                 "model": item.model,
                 "token_usage": item.token_usage(),
+                "output_normalized": True,
             }
             for item in contributions
         ]
@@ -553,6 +582,10 @@ class PlatformService:
         if context.interaction_mode != "roundtable":
             return owner_result.content
 
+        owner_result = PlatformService._normalized_owner_result(
+            context,
+            owner_result,
+        )
         blocks = [
             f"### {item.display_name}\n{item.content.strip()}"
             for item in contributions
@@ -585,6 +618,7 @@ class PlatformService:
                     "provider": item.provider,
                     "model": item.model,
                     "token_usage": item.token_usage(),
+                    "output_normalized": True,
                 }
             )
         trace.append(
@@ -612,6 +646,9 @@ class PlatformService:
                     owner_result.token_usage()
                     if owner_result is not None
                     else None
+                ),
+                "output_normalized": (
+                    context.interaction_mode == "roundtable"
                 ),
             }
         )
@@ -1041,6 +1078,7 @@ class PlatformService:
                         "provider": contribution.provider,
                         "model": contribution.model,
                         "token_usage": contribution.token_usage(),
+                        "output_normalized": True,
                     },
                 )
 
@@ -1083,15 +1121,16 @@ class PlatformService:
                         if not event.delta:
                             continue
                         chunks.append(event.delta)
-                        yield TurnStreamSignal(
-                            kind="delta",
-                            payload={
-                                "content": event.delta,
-                                "chunk_index": chunk_index,
-                                "replayed": False,
-                            },
-                        )
-                        chunk_index += 1
+                        if context.interaction_mode != "roundtable":
+                            yield TurnStreamSignal(
+                                kind="delta",
+                                payload={
+                                    "content": event.delta,
+                                    "chunk_index": chunk_index,
+                                    "replayed": False,
+                                },
+                            )
+                            chunk_index += 1
                     elif event.event_type == "completed":
                         owner_result = event.result
             finally:
@@ -1131,6 +1170,24 @@ class PlatformService:
                     input_tokens=owner_result.input_tokens,
                     output_tokens=owner_result.output_tokens,
                     total_tokens=owner_result.total_tokens,
+                )
+
+            owner_result = self._normalized_owner_result(
+                context,
+                owner_result,
+            )
+            if (
+                context.interaction_mode == "roundtable"
+                and owner_result.content
+            ):
+                yield TurnStreamSignal(
+                    kind="delta",
+                    payload={
+                        "content": owner_result.content,
+                        "chunk_index": 0,
+                        "replayed": False,
+                        "normalized": True,
+                    },
                 )
 
             content = self._final_content(
@@ -1290,6 +1347,11 @@ class PlatformService:
             contributor_agents=[
                 item.agent_id for item in contribution_tuple
             ],
+            output_normalization=(
+                "speaker_scoped_v1"
+                if context.interaction_mode == "roundtable"
+                else "not_required"
+            ),
         )
         response = self.response_from_execution(
             completed,

@@ -42,3 +42,36 @@ def test_evolution_proposal_requires_admin_before_feature_gate(
     body = response.json()
     detail = body.get("error") or body.get("detail")
     assert detail["code"] == "ADMIN_ROLE_REQUIRED"
+
+
+def test_admin_overview_exposes_truthful_audit_snapshot(
+    client,
+    admin_headers,
+):
+    client.post(
+        "/api/threads",
+        headers=admin_headers,
+        json={"title": "Audit snapshot"},
+    )
+    response = client.get(
+        "/api/admin/overview",
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["scope"] == "tenant_only"
+    assert body["runtime"]["release_version"] == "0.6.2"
+    assert body["runtime"]["execution_graph"] == "trace_lite"
+    assert body["runtime"]["voice_webrtc"] == "planned"
+    assert body["capability_summary"]["available"] >= 4
+    assert body["capability_summary"]["planned"] >= 5
+    assert body["governance"] == {
+        "proposal_only": False,
+        "write_executed": False,
+        "commit_executed": False,
+        "merge_executed": False,
+        "deploy_executed": False,
+        "migration_executed": False,
+        "human_approval_required": True,
+    }

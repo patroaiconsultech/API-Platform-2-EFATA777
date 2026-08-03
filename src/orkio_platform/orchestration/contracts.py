@@ -18,6 +18,10 @@ class CapabilityDefinition:
     runtime: str
     status: str
     version: str
+    availability: str = "available"
+    evidence: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    human_approval_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
