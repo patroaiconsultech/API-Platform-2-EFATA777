@@ -17,6 +17,7 @@ def new_id(prefix: str) -> str:
 
 ExecutionStatus = Literal["running", "success", "error", "cancelled"]
 RecoveryDecision = Literal["retry", "cancel", "abandon"]
+InteractionMode = Literal["single", "team_synthesis", "roundtable"]
 
 
 class PrincipalContext(BaseModel):
@@ -115,6 +116,7 @@ class AgentTurnContext(BaseModel):
     turn_owner: str
     display_agent: str
     route_family: str
+    interaction_mode: InteractionMode = "single"
     contributing_agents: tuple[str, ...] = ()
     trace_kind: Literal["trace_lite"] = "trace_lite"
     ownership_locked: bool = True
@@ -142,11 +144,13 @@ class ResponseEnvelope(BaseModel):
     final_speaker: str
     turn_owner: str
     route_family: str
+    interaction_mode: InteractionMode = "single"
     content: str
     status: Literal["success", "error", "cancelled"]
     error: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
     execution_trace: list[dict[str, Any]] | None = None
+    contributions: list[dict[str, Any]] | None = None
     latency_ms: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -171,6 +175,7 @@ class ChatRequest(BaseModel):
     thread_id: str
     content: str = Field(min_length=1, max_length=100_000)
     requested_agent: str | None = None
+    interaction_mode: InteractionMode | None = None
     request_id: str | None = None
     simulate_error: bool = False
 

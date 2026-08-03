@@ -61,3 +61,18 @@ def test_unknown_agent_fails_closed(client, member_headers):
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "AGENT_NOT_FOUND"
+
+
+def test_invalid_interaction_mode_fails_validation(client, member_headers):
+    thread = setup_thread(client, member_headers)
+    response = client.post(
+        "/api/chat",
+        headers=member_headers,
+        json={
+            "thread_id": thread["thread_id"],
+            "content": "Teste",
+            "requested_agent": "Team",
+            "interaction_mode": "hidden_magic",
+        },
+    )
+    assert response.status_code == 422

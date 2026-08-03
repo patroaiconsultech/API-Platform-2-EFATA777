@@ -21,6 +21,7 @@ from orkio_platform.llm.deterministic import (
 )
 from orkio_platform.llm.prompts import (
     contribution_prompt_for_agent,
+    roundtable_owner_prompt,
     synthesis_prompt_for_agent,
     system_prompt_for_agent,
 )
@@ -139,6 +140,7 @@ class PlatformService:
             enabled=self.multiagent_enabled,
             max_contributors=self.multiagent_max_contributors,
             team_agents=self.multiagent_team_agents,
+            interaction_mode=request.interaction_mode,
         )
         owner = resolve_agent(plan.owner_agent)
         return AgentTurnContext(
@@ -152,6 +154,7 @@ class PlatformService:
             turn_owner=owner.agent_id,
             display_agent=owner.display_name,
             route_family=plan.route_family,
+            interaction_mode=plan.interaction_mode,
             contributing_agents=plan.contributors,
             trace_kind=plan.trace_kind,
         )
@@ -169,6 +172,7 @@ class PlatformService:
             "turn_owner": context.turn_owner,
             "contributing_agents": context.contributing_agents,
             "route_family": context.route_family,
+            "interaction_mode": context.interaction_mode,
             "content": request.content,
             "simulate_error": request.simulate_error,
         }
@@ -413,14 +417,16 @@ class PlatformService:
         contributions: tuple[AgentContribution, ...],
     ) -> LLMCompletionRequest:
         owner = resolve_agent(context.turn_owner)
+        system_prompt = (
+            roundtable_owner_prompt(owner, contributions)
+            if context.interaction_mode == "roundtable"
+            else synthesis_prompt_for_agent(owner, contributions)
+        )
         return self._llm_request_for_agent(
             context,
             request,
             agent_id=owner.agent_id,
-            system_prompt=synthesis_prompt_for_agent(
-                owner,
-                contributions,
-            ),
+            system_prompt=system_prompt,
         )
 
     @staticmethod
@@ -508,6 +514,56 @@ class PlatformService:
                 if isinstance(value, int):
                     totals[key] += value
         return totals if observed else None
+
+    @staticmethod
+    def _contribution_payloads(
+        contributions: tuple[AgentContribution, ...],
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "agent_id": item.agent_id,
+                "display_name": item.display_name,
+                "role": "contributor",
+                "status": "success",
+                "content": item.content,
+                "provider": item.provider,
+                "model": item.model,
+                "token_usage": item.token_usage(),
+            }
+            for item in contributions
+        ]
+
+    @staticmethod
+    def _interaction_mode_from_route(route_family: str) -> str:
+        if "roundtable" in route_family:
+            return "roundtable"
+        if (
+            "synthesis" in route_family
+            or route_family == "team_multiagent"
+        ):
+            return "team_synthesis"
+        return "single"
+
+    @staticmethod
+    def _final_content(
+        context: AgentTurnContext,
+        contributions: tuple[AgentContribution, ...],
+        owner_result: LLMResult,
+    ) -> str:
+        if context.interaction_mode != "roundtable":
+            return owner_result.content
+
+        blocks = [
+            f"### {item.display_name}\n{item.content.strip()}"
+            for item in contributions
+            if item.content.strip()
+        ]
+        owner_name = resolve_agent(context.turn_owner).display_name
+        if owner_result.content.strip():
+            blocks.append(
+                f"### {owner_name}\n{owner_result.content.strip()}"
+            )
+        return "\n\n".join(blocks).strip()
 
     @staticmethod
     def _execution_trace(
@@ -616,6 +672,9 @@ class PlatformService:
             final_speaker=execution.turn_owner,
             turn_owner=execution.turn_owner,
             route_family=execution.route_family,
+            interaction_mode=self._interaction_mode_from_route(
+                execution.route_family
+            ),
             content=content,
             status=execution.status,
             error=error,
@@ -682,7 +741,11 @@ class PlatformService:
                 context,
                 request,
             )
-            content = provider_result.content
+            content = self._final_content(
+                context,
+                contributions,
+                provider_result,
+            )
         except LLMProviderError as exc:
             terminal_message = self._assistant_message(
                 context,
@@ -838,6 +901,10 @@ class PlatformService:
         )
         response_updates: dict[str, object] = {
             "execution_trace": execution_trace,
+            "interaction_mode": context.interaction_mode,
+            "contributions": self._contribution_payloads(
+                contributions
+            ),
         }
         if token_usage is not None:
             response_updates["token_usage"] = token_usage
@@ -940,8 +1007,12 @@ class PlatformService:
                         "phase": "node_started",
                         "node_id": node_id,
                         "agent_id": contributor_id,
+                        "display_name": resolve_agent(
+                            contributor_id
+                        ).display_name,
                         "role": "contributor",
                         "trace_kind": context.trace_kind,
+                        "interaction_mode": context.interaction_mode,
                     },
                 )
                 result = self.llm_provider.complete(
@@ -962,9 +1033,13 @@ class PlatformService:
                         "phase": "node_completed",
                         "node_id": node_id,
                         "agent_id": contributor_id,
+                        "display_name": contribution.display_name,
                         "role": "contributor",
                         "trace_kind": context.trace_kind,
+                        "interaction_mode": context.interaction_mode,
                         "content": contribution.content,
+                        "provider": contribution.provider,
+                        "model": contribution.model,
                         "token_usage": contribution.token_usage(),
                     },
                 )
@@ -1024,31 +1099,45 @@ class PlatformService:
                 if callable(close):
                     close()
 
-            content = "".join(chunks).strip()
+            streamed_owner_content = "".join(chunks).strip()
             if owner_result is None:
-                if not content:
+                if not streamed_owner_content:
                     raise LLMProviderError(
                         "LLM_PROVIDER_EMPTY_RESPONSE",
                         "The language model provider returned no text.",
                         retryable=False,
                     )
                 owner_result = LLMResult(
-                    content=content,
+                    content=streamed_owner_content,
                     provider=self.llm_provider.provider_name,
                     model=self.llm_provider.model_name,
                 )
             elif not chunks and owner_result.content:
-                content = owner_result.content
+                streamed_owner_content = owner_result.content
                 yield TurnStreamSignal(
                     kind="delta",
                     payload={
-                        "content": content,
+                        "content": streamed_owner_content,
                         "chunk_index": 0,
                         "replayed": False,
                     },
                 )
-            else:
-                content = owner_result.content or content
+            elif not owner_result.content:
+                owner_result = LLMResult(
+                    content=streamed_owner_content,
+                    provider=owner_result.provider,
+                    model=owner_result.model,
+                    response_id=owner_result.response_id,
+                    input_tokens=owner_result.input_tokens,
+                    output_tokens=owner_result.output_tokens,
+                    total_tokens=owner_result.total_tokens,
+                )
+
+            content = self._final_content(
+                context,
+                tuple(contributions),
+                owner_result,
+            )
 
         except LLMProviderError as exc:
             terminal_message = self._assistant_message(
@@ -1208,6 +1297,10 @@ class PlatformService:
         )
         updates: dict[str, object] = {
             "execution_trace": execution_trace,
+            "interaction_mode": context.interaction_mode,
+            "contributions": self._contribution_payloads(
+                contribution_tuple
+            ),
         }
         if token_usage is not None:
             updates["token_usage"] = token_usage

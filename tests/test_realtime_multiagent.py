@@ -326,3 +326,150 @@ def test_realtime_replay_does_not_call_provider_or_duplicate_messages():
         if item["event"] == "agent_done"
     )
     assert second_message["content"] == "Final answer"
+
+
+def test_team_emits_typed_user_visible_contribution_events():
+    repository = InMemoryRepository()
+    provider = MultiAgentProvider()
+    service = PlatformService(
+        repository,
+        llm_provider=provider,
+        realtime_streaming_enabled=True,
+        multiagent_enabled=True,
+        multiagent_max_contributors=3,
+        multiagent_team_agents=("Orion", "Chris", "Laura"),
+    )
+    thread = service.create_thread(principal(), "Visible Team")
+
+    observed = parse_events(
+        "".join(
+            stream_chat(
+                service,
+                principal(),
+                ChatRequest(
+                    thread_id=thread.thread_id,
+                    content="Analise a experiência completa.",
+                    requested_agent="Team",
+                    interaction_mode="team_synthesis",
+                    request_id="request-visible-team",
+                ),
+            )
+        )
+    )
+
+    started = [
+        item["data"]["payload"]
+        for item in observed
+        if item["event"] == "agent_contribution_started"
+    ]
+    completed = [
+        item["data"]["payload"]
+        for item in observed
+        if item["event"] == "agent_contribution_done"
+    ]
+    assert [item["agent_id"] for item in started] == [
+        "Orion",
+        "Chris",
+        "Laura",
+    ]
+    assert [item["agent_id"] for item in completed] == [
+        "Orion",
+        "Chris",
+        "Laura",
+    ]
+    assert all(item["content"] for item in completed)
+    message = next(
+        item["data"]["payload"]["message"]
+        for item in observed
+        if item["event"] == "agent_done"
+    )
+    assert message["interaction_mode"] == "team_synthesis"
+    assert [
+        item["agent_id"] for item in message["contributions"]
+    ] == ["Orion", "Chris", "Laura"]
+    assert message["turn_owner"] == "Orkio"
+
+
+def test_roundtable_persists_each_agent_view_and_owner():
+    repository = InMemoryRepository()
+    provider = MultiAgentProvider()
+    service = PlatformService(
+        repository,
+        llm_provider=provider,
+        realtime_streaming_enabled=True,
+        multiagent_enabled=True,
+        multiagent_max_contributors=3,
+        multiagent_team_agents=("Orion", "Chris", "Laura"),
+    )
+    thread = service.create_thread(principal(), "Roundtable")
+
+    observed = parse_events(
+        "".join(
+            stream_chat(
+                service,
+                principal(),
+                ChatRequest(
+                    thread_id=thread.thread_id,
+                    content="Cada agente deve responder oi.",
+                    requested_agent="Team",
+                    interaction_mode="roundtable",
+                    request_id="request-roundtable",
+                ),
+            )
+        )
+    )
+
+    message = next(
+        item["data"]["payload"]["message"]
+        for item in observed
+        if item["event"] == "agent_done"
+    )
+    assert message["interaction_mode"] == "roundtable"
+    assert message["route_family"] == "team_roundtable"
+    assert message["turn_owner"] == "Orkio"
+    assert "### Orion" in message["content"]
+    assert "### Chris" in message["content"]
+    assert "### Laura" in message["content"]
+    assert "### Orkio" in message["content"]
+
+    persisted = repository.list_messages(
+        "tenant-a",
+        thread.thread_id,
+    )
+    assert persisted[-1].content == message["content"]
+    assert persisted[-1].turn_owner == "Orkio"
+
+
+def test_single_mode_disables_peer_routing_for_explicit_agent():
+    repository = InMemoryRepository()
+    provider = MultiAgentProvider()
+    service = PlatformService(
+        repository,
+        llm_provider=provider,
+        realtime_streaming_enabled=True,
+        multiagent_enabled=True,
+        multiagent_max_contributors=3,
+    )
+    thread = service.create_thread(principal(), "Single")
+
+    parse_events(
+        "".join(
+            stream_chat(
+                service,
+                principal(),
+                ChatRequest(
+                    thread_id=thread.thread_id,
+                    content=(
+                        "Avalie arquitetura, estratégia e experiência."
+                    ),
+                    requested_agent="Orion",
+                    interaction_mode="single",
+                    request_id="request-single",
+                ),
+            )
+        )
+    )
+    assert provider.complete_requests == []
+    assert [item.agent_id for item in provider.stream_requests] == [
+        "Orion"
+    ]

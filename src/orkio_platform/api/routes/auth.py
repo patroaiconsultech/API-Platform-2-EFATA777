@@ -21,12 +21,22 @@ def auth_status() -> dict[str, object]:
     )
 
     demo_profile = None
+    demo_admin_profile = None
     if demo_enabled:
         demo_profile = {
             "tenant_id": settings.demo_allowed_tenants[0],
             "user_id": settings.demo_allowed_users[0],
             "role": "member",
         }
+        if (
+            settings.demo_admin_enabled
+            and settings.demo_admin_users
+        ):
+            demo_admin_profile = {
+                "tenant_id": settings.demo_allowed_tenants[0],
+                "user_id": settings.demo_admin_users[0],
+                "role": "admin",
+            }
 
     oidc_public_config = None
     if oidc_enabled:
@@ -58,6 +68,7 @@ def auth_status() -> dict[str, object]:
             else False
         ),
         "demo_profile": demo_profile,
+        "demo_admin_profile": demo_admin_profile,
         "external_provider_configured": oidc_enabled,
         "oidc": oidc_public_config,
     }

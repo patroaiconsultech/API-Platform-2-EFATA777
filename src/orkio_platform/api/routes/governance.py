@@ -87,6 +87,7 @@ def create_evolution_proposal(
     payload: EvolutionProposalRequest,
     principal: PrincipalContext = Depends(get_principal),
 ) -> EvolutionProposalEnvelope:
+    principal = require_admin(principal)
     if not settings.assisted_evolution_enabled:
         raise DomainError(
             "ASSISTED_EVOLUTION_DISABLED",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from orkio_platform.application.catalog import resolve_agent
+from orkio_platform.domain.models import InteractionMode
 from orkio_platform.orchestration.contracts import OrchestrationPlan
 
 
@@ -26,6 +27,19 @@ def _matches(text: str, terms: set[str]) -> bool:
     return any(term in normalized for term in terms)
 
 
+def _effective_mode(
+    requested_agent: str,
+    interaction_mode: InteractionMode | None,
+) -> InteractionMode:
+    if requested_agent == "Team":
+        if interaction_mode in {"roundtable", "team_synthesis"}:
+            return interaction_mode
+        return "team_synthesis"
+    # Preserve the R0.6.0 behavior for older clients that do not send an
+    # explicit mode: specialist routing may still request complementary peers.
+    return interaction_mode or "team_synthesis"
+
+
 def build_orchestration_plan(
     requested_agent: str | None,
     content: str,
@@ -33,8 +47,10 @@ def build_orchestration_plan(
     enabled: bool,
     max_contributors: int,
     team_agents: tuple[str, ...],
+    interaction_mode: InteractionMode | None = None,
 ) -> OrchestrationPlan:
     requested = requested_agent or "Orkio"
+    mode = _effective_mode(requested, interaction_mode)
 
     if requested == "Team":
         resolve_agent("Team")
@@ -45,19 +61,29 @@ def build_orchestration_plan(
         )[:max_contributors]
         for agent_id in contributors:
             resolve_agent(agent_id)
+        active_contributors = contributors if enabled else ()
         return OrchestrationPlan(
             requested_agent="Team",
             owner_agent="Orkio",
-            contributors=contributors if enabled else (),
+            contributors=active_contributors,
             route_family=(
-                "team_multiagent"
-                if enabled and contributors
-                else "team_owner_only"
+                "team_roundtable"
+                if enabled and active_contributors and mode == "roundtable"
+                else (
+                    "team_synthesis"
+                    if enabled and active_contributors
+                    else "team_owner_only"
+                )
             ),
+            interaction_mode=mode,
         )
 
     owner = resolve_agent(requested)
-    if not enabled or max_contributors == 0:
+    if (
+        not enabled
+        or max_contributors == 0
+        or mode == "single"
+    ):
         return OrchestrationPlan(
             requested_agent=requested,
             owner_agent=owner.agent_id,
@@ -67,6 +93,7 @@ def build_orchestration_plan(
                 if requested_agent
                 else "default_orchestrator"
             ),
+            interaction_mode="single",
         )
 
     candidates: list[str] = []
@@ -77,8 +104,6 @@ def build_orchestration_plan(
     if _matches(content, COMMUNICATION_TERMS):
         candidates.append("Laura")
 
-    # Orkio may coordinate multiple domains. Explicit specialists remain owners
-    # and receive only complementary peers.
     contributors: list[str] = []
     for candidate in candidates:
         if candidate == owner.agent_id or candidate in contributors:
@@ -93,12 +118,17 @@ def build_orchestration_plan(
         owner_agent=owner.agent_id,
         contributors=tuple(contributors),
         route_family=(
-            "multiagent_orchestration"
-            if contributors
+            "specialist_roundtable"
+            if contributors and mode == "roundtable"
             else (
-                "explicit_agent"
-                if requested_agent
-                else "default_orchestrator"
+                "specialist_synthesis"
+                if contributors
+                else (
+                    "explicit_agent"
+                    if requested_agent
+                    else "default_orchestrator"
+                )
             )
         ),
+        interaction_mode=mode if contributors else "single",
     )

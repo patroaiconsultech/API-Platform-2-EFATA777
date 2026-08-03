@@ -178,6 +178,11 @@ def stream_chat(
                 "request_id": context.request_id,
                 "execution_id": context.execution_id,
                 "route_family": context.route_family,
+                "interaction_mode": context.interaction_mode,
+                "contributing_agents": list(
+                    context.contributing_agents
+                ),
+                "trace_kind": context.trace_kind,
                 "replayed": not created,
             },
         )
@@ -187,6 +192,10 @@ def stream_chat(
                 "agent_id": context.turn_owner,
                 "display_name": context.display_agent,
                 "ownership_locked": context.ownership_locked,
+                "interaction_mode": context.interaction_mode,
+                "realtime_streaming": (
+                    service.realtime_streaming_enabled
+                ),
                 "replayed": not created,
             },
         )
@@ -203,6 +212,17 @@ def stream_chat(
             ):
                 if signal.kind == "execution":
                     yield emit("execution", signal.payload)
+                    phase = signal.payload.get("phase")
+                    if phase == "node_started":
+                        yield emit(
+                            "agent_contribution_started",
+                            signal.payload,
+                        )
+                    elif phase == "node_completed":
+                        yield emit(
+                            "agent_contribution_done",
+                            signal.payload,
+                        )
                     continue
                 if signal.kind == "delta":
                     yield emit("agent_chunk", signal.payload)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from orkio_platform.domain.models import InteractionMode
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilityDefinition:
@@ -24,6 +26,7 @@ class OrchestrationPlan:
     owner_agent: str
     contributors: tuple[str, ...]
     route_family: str
+    interaction_mode: InteractionMode
     trace_kind: str = "trace_lite"
 
     @property
