@@ -30,3 +30,35 @@ def test_composite_tenant_key_blocks_cross_tenant_access(tmp_path):
     ))
     with pytest.raises(NotFoundError):
         repository.get_thread("tenant-b","same-id")
+
+
+def test_thread_rename_persists_and_remains_tenant_scoped(tmp_path):
+    database = tmp_path / "rename.sqlite"
+    repository = build_repository(database)
+    repository.create_thread(
+        ThreadRecord(
+            thread_id="thread-rename",
+            tenant_id="tenant-a",
+            created_by="user-a",
+            title="Antes",
+        )
+    )
+
+    renamed = repository.update_thread_title(
+        "tenant-a",
+        "thread-rename",
+        "Depois",
+    )
+
+    assert renamed.title == "Depois"
+    reopened = build_repository(database)
+    assert (
+        reopened.get_thread("tenant-a", "thread-rename").title
+        == "Depois"
+    )
+    with pytest.raises(NotFoundError):
+        repository.update_thread_title(
+            "tenant-b",
+            "thread-rename",
+            "Tentativa indevida",
+        )

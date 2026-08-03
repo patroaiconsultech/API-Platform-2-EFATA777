@@ -32,6 +32,7 @@ from orkio_platform.llm.prompts import (
 )
 from orkio_platform.domain.errors import (
     ConflictError,
+    DomainError,
     NotFoundError,
     ServiceUnavailableError,
 )
@@ -53,6 +54,11 @@ from orkio_platform.infrastructure.repository_protocol import (
 )
 from orkio_platform.observability.execution import log_execution_event
 from orkio_platform.orchestration.contracts import AgentContribution
+from orkio_platform.orchestration.task_decomposition import (
+    OwnerContract,
+    TaskSlice,
+    decompose_user_request,
+)
 from orkio_platform.orchestration.router import build_orchestration_plan
 from orkio_platform.orchestration.output_normalization import (
     AgentOutputAssessment,
@@ -178,6 +184,25 @@ class PlatformService:
         principal: PrincipalContext,
     ) -> list[ThreadRecord]:
         return self.repository.list_threads(principal.tenant_id)
+
+    def rename_thread(
+        self,
+        principal: PrincipalContext,
+        thread_id: str,
+        title: str,
+    ) -> ThreadRecord:
+        normalized = " ".join(title.split())
+        if not normalized:
+            raise DomainError(
+                "THREAD_TITLE_REQUIRED",
+                "Thread title is required.",
+                status_code=400,
+            )
+        return self.repository.update_thread_title(
+            principal.tenant_id,
+            thread_id,
+            normalized,
+        )
 
     def list_messages(
         self,
@@ -462,22 +487,27 @@ class PlatformService:
         agent_id: str,
         system_prompt: str,
         current_only: bool = False,
+        current_content: str | None = None,
         max_output_tokens: int | None = None,
         history_messages_limit: int | None = None,
         max_context_chars: int | None = None,
     ) -> LLMCompletionRequest:
         agent = resolve_agent(agent_id)
+        effective_content = current_content or request.content
+        effective_request = request.model_copy(
+            update={"content": effective_content},
+        )
         messages = (
             (
                 LLMMessage(
                     role="user",
-                    content=request.content,
+                    content=effective_content,
                 ),
             )
             if current_only
             else self._history_messages(
                 context,
-                request,
+                effective_request,
                 history_messages_limit=history_messages_limit,
                 max_context_chars=max_context_chars,
             )
@@ -493,6 +523,7 @@ class PlatformService:
             max_output_tokens=max_output_tokens,
         )
 
+
     def _contribution_request(
         self,
         context: AgentTurnContext,
@@ -500,8 +531,12 @@ class PlatformService:
         contributor_id: str,
         *,
         retry_reason: str | None = None,
+        task_slice: TaskSlice | None = None,
     ) -> LLMCompletionRequest:
         contributor = resolve_agent(contributor_id)
+        selected_task = task_slice or decompose_user_request(
+            request.content,
+        ).for_agent(contributor_id)
         system_prompt = (
             contribution_retry_prompt_for_agent(
                 contributor,
@@ -515,13 +550,15 @@ class PlatformService:
             request,
             agent_id=contributor.agent_id,
             system_prompt=system_prompt,
-            current_only=retry_reason is not None,
+            current_only=True,
+            current_content=selected_task.user_message,
             max_output_tokens=(
                 self.multiagent_contribution_max_output_tokens
             ),
-            history_messages_limit=self.multiagent_history_messages,
+            history_messages_limit=0,
             max_context_chars=self.multiagent_max_context_chars,
         )
+
 
     def _owner_request(
         self,
@@ -532,38 +569,49 @@ class PlatformService:
         retry_reason: str | None = None,
     ) -> LLMCompletionRequest:
         owner = resolve_agent(context.turn_owner)
+        decomposition = decompose_user_request(request.content)
+        owner_slice = decomposition.for_agent(context.turn_owner)
+        owner_contract = decomposition.owner_contract
+
         if context.interaction_mode == "roundtable":
             system_prompt = (
                 roundtable_owner_retry_prompt(
                     owner,
                     contributions,
                     retry_reason,
+                    owner_contract,
                 )
                 if retry_reason
-                else roundtable_owner_prompt(owner, contributions)
+                else roundtable_owner_prompt(
+                    owner,
+                    contributions,
+                    owner_contract,
+                )
             )
         else:
             system_prompt = synthesis_prompt_for_agent(
                 owner,
                 contributions,
             )
+
         multiagent_request = context.interaction_mode != "single"
         return self._llm_request_for_agent(
             context,
             request,
             agent_id=owner.agent_id,
             system_prompt=system_prompt,
-            current_only=retry_reason is not None,
+            current_only=multiagent_request,
+            current_content=(
+                owner_slice.user_message
+                if multiagent_request
+                else request.content
+            ),
             max_output_tokens=(
                 self.multiagent_owner_max_output_tokens
                 if multiagent_request
                 else None
             ),
-            history_messages_limit=(
-                self.multiagent_history_messages
-                if multiagent_request
-                else None
-            ),
+            history_messages_limit=0 if multiagent_request else None,
             max_context_chars=(
                 self.multiagent_max_context_chars
                 if multiagent_request
@@ -588,6 +636,7 @@ class PlatformService:
         agent_id: str,
         results: list[LLMResult],
         assessment: AgentOutputAssessment,
+        task_slice: TaskSlice,
         *,
         retry_count: int,
         latency_ms: int,
@@ -630,7 +679,12 @@ class PlatformService:
             latency_ms=latency_ms,
             output_normalized=assessment.normalized,
             budget_exceeded=budget_exceeded,
+            contract_version=assessment.contract_version,
+            assigned_task=task_slice.assigned_task,
+            task_slice_version=task_slice.version,
+            explicit_assignment=task_slice.explicit_assignment,
         )
+
 
     def _failed_contribution(
         self,
@@ -638,6 +692,7 @@ class PlatformService:
         *,
         reason: str,
         latency_ms: int,
+        task_slice: TaskSlice | None = None,
         retry_count: int = 0,
     ) -> AgentContribution:
         agent = resolve_agent(agent_id)
@@ -655,7 +710,23 @@ class PlatformService:
                 latency_ms
                 > self.multiagent_contribution_latency_budget_ms
             ),
+            assigned_task=(
+                task_slice.assigned_task
+                if task_slice is not None
+                else None
+            ),
+            task_slice_version=(
+                task_slice.version
+                if task_slice is not None
+                else "task_slice_v1"
+            ),
+            explicit_assignment=(
+                task_slice.explicit_assignment
+                if task_slice is not None
+                else False
+            ),
         )
+
 
     def _complete_contribution(
         self,
@@ -666,12 +737,16 @@ class PlatformService:
         started = perf_counter()
         results: list[LLMResult] = []
         retry_count = 0
+        task_slice = decompose_user_request(
+            request.content,
+        ).for_agent(contributor_id)
         try:
             first = self.llm_provider.complete(
                 self._contribution_request(
                     context,
                     request,
                     contributor_id,
+                    task_slice=task_slice,
                 )
             )
             results.append(first)
@@ -692,6 +767,7 @@ class PlatformService:
                             assessment.reason
                             or assessment.status
                         ),
+                        task_slice=task_slice,
                     )
                 )
                 results.append(second)
@@ -707,6 +783,7 @@ class PlatformService:
                 contributor_id,
                 reason=exc.code,
                 retry_count=retry_count,
+                task_slice=task_slice,
                 latency_ms=int(
                     (perf_counter() - started) * 1000
                 ),
@@ -716,6 +793,7 @@ class PlatformService:
                 contributor_id,
                 reason="PROVIDER_EXECUTION_FAILED",
                 retry_count=retry_count,
+                task_slice=task_slice,
                 latency_ms=int(
                     (perf_counter() - started) * 1000
                 ),
@@ -725,9 +803,11 @@ class PlatformService:
             contributor_id,
             results,
             assessment,
+            task_slice,
             retry_count=retry_count,
             latency_ms=int((perf_counter() - started) * 1000),
         )
+
 
     def generate_contributions(
         self,
@@ -749,20 +829,37 @@ class PlatformService:
         results: list[LLMResult],
         assessment: AgentOutputAssessment | None,
         *,
+        owner_contract: OwnerContract,
         retry_count: int,
         latency_ms: int,
     ) -> tuple[LLMResult, dict[str, object]]:
         final = results[-1]
+        partial = (
+            assessment is not None
+            and assessment.status != "success"
+        )
         if assessment is None:
             content = final.content
             status = "success"
             reason = None
             normalized = False
+            contract_version = "owner_synthesis_v1"
+        elif partial:
+            content = (
+                "A síntese de Orkio foi bloqueada porque não cumpriu "
+                "o contrato adaptativo. As contribuições validadas "
+                "foram preservadas."
+            )
+            status = "partial"
+            reason = assessment.reason or assessment.status
+            normalized = True
+            contract_version = assessment.contract_version
         else:
             content = assessment.content
-            status = assessment.status
-            reason = assessment.reason
+            status = "success"
+            reason = None
             normalized = assessment.normalized
+            contract_version = assessment.contract_version
 
         result = LLMResult(
             content=content,
@@ -788,7 +885,11 @@ class PlatformService:
             "retry_count": retry_count,
             "latency_ms": latency_ms,
             "output_normalized": normalized,
-            "contract_version": "owner_decision_v2",
+            "contract_version": contract_version,
+            "owner_contract": owner_contract,
+            "task_slice_version": "task_slice_v1",
+            "contributors_preserved": partial,
+            "retry_scope": "owner_only",
             "budget_exceeded": (
                 latency_ms > self.multiagent_turn_latency_budget_ms
                 or any(
@@ -808,6 +909,8 @@ class PlatformService:
         contributions: tuple[AgentContribution, ...],
     ) -> tuple[LLMResult, dict[str, object]]:
         started = perf_counter()
+        decomposition = decompose_user_request(request.content)
+        owner_contract = decomposition.owner_contract
         results: list[LLMResult] = [
             self.llm_provider.complete(
                 self._owner_request(
@@ -824,6 +927,7 @@ class PlatformService:
             assessment = assess_owner_output(
                 results[-1].content,
                 context.turn_owner,
+                owner_contract=owner_contract,
                 max_chars=self.multiagent_contribution_max_chars,
             )
             if assessment.retryable_contract_failure:
@@ -844,33 +948,21 @@ class PlatformService:
                 assessment = assess_owner_output(
                     results[-1].content,
                     context.turn_owner,
+                    owner_contract=owner_contract,
                     max_chars=(
                         self.multiagent_contribution_max_chars
                     ),
-                )
-
-            if assessment.status != "success":
-                error_code = (
-                    "OWNER_REFUSED"
-                    if assessment.status == "refused"
-                    else "OWNER_CONTRACT_VIOLATION"
-                )
-                raise LLMProviderError(
-                    error_code,
-                    (
-                        "The coordinator output violated the "
-                        "speaker contract."
-                    ),
-                    retryable=False,
                 )
 
         return self._owner_result_from_attempts(
             context,
             results,
             assessment,
+            owner_contract=owner_contract,
             retry_count=retry_count,
             latency_ms=int((perf_counter() - started) * 1000),
         )
+
 
     def generate_content(
         self,
@@ -940,6 +1032,9 @@ class PlatformService:
                 "output_normalized": item.output_normalized,
                 "budget_exceeded": item.budget_exceeded,
                 "contract_version": item.contract_version,
+                "assigned_task": item.assigned_task,
+                "task_slice_version": item.task_slice_version,
+                "explicit_assignment": item.explicit_assignment,
             }
             for item in contributions
         ]
@@ -1026,6 +1121,9 @@ class PlatformService:
                     "output_normalized": item.output_normalized,
                     "budget_exceeded": item.budget_exceeded,
                     "contract_version": item.contract_version,
+                    "assigned_task": item.assigned_task,
+                    "task_slice_version": item.task_slice_version,
+                    "explicit_assignment": item.explicit_assignment,
                 }
             )
         trace.append(
@@ -1086,10 +1184,10 @@ class PlatformService:
                 "contract_version": (
                     owner_contract.get(
                         "contract_version",
-                        "owner_decision_v2",
+                        "owner_synthesis_v1",
                     )
                     if owner_contract is not None
-                    else "owner_decision_v2"
+                    else "owner_synthesis_v1"
                 ),
             }
         )
@@ -1167,12 +1265,23 @@ class PlatformService:
             )
         content = "" if message is None else message.content
         error = None
-        if execution.status == "error":
+        if execution.status in {"error", "partial"}:
             error = {
-                "code": execution.error_code or "EXECUTION_FAILED",
+                "code": (
+                    execution.error_code
+                    or (
+                        "EXECUTION_PARTIAL"
+                        if execution.status == "partial"
+                        else "EXECUTION_FAILED"
+                    )
+                ),
                 "message": (
                     execution.error_message
-                    or "The execution ended with an error."
+                    or (
+                        "A execução terminou parcialmente."
+                        if execution.status == "partial"
+                        else "The execution ended with an error."
+                    )
                 ),
             }
         return ResponseEnvelope(
@@ -1351,16 +1460,39 @@ class PlatformService:
                 False,
             )
 
+        partial_owner = (
+            owner_contract is not None
+            and owner_contract.get("status") == "partial"
+        )
         assistant_message = self._assistant_message(
             context,
             content,
-            status="success",
+            status="partial" if partial_owner else "success",
+            error_code=(
+                "OWNER_CONTRACT_PARTIAL"
+                if partial_owner
+                else None
+            ),
+            error_message=(
+                "A síntese final foi bloqueada; as contribuições "
+                "validadas foram preservadas."
+                if partial_owner
+                else None
+            ),
         )
         try:
-            completed = self.repository.complete_execution(
-                execution,
-                user_message,
-                assistant_message,
+            completed = (
+                self.repository.partial_execution(
+                    execution,
+                    user_message,
+                    assistant_message,
+                )
+                if partial_owner
+                else self.repository.complete_execution(
+                    execution,
+                    user_message,
+                    assistant_message,
+                )
             )
         except Exception as exc:
             current = self.repository.get_execution(
@@ -1404,7 +1536,11 @@ class PlatformService:
             owner_contract,
         )
         log_execution_event(
-            "execution_terminal_success",
+            (
+                "execution_terminal_partial"
+                if partial_owner
+                else "execution_terminal_success"
+            ),
             completed,
             provider=(
                 provider_result.provider
@@ -1585,6 +1721,15 @@ class PlatformService:
                         "contract_version": (
                             contribution.contract_version
                         ),
+                        "assigned_task": (
+                            contribution.assigned_task
+                        ),
+                        "task_slice_version": (
+                            contribution.task_slice_version
+                        ),
+                        "explicit_assignment": (
+                            contribution.explicit_assignment
+                        ),
                     },
                 )
 
@@ -1681,10 +1826,14 @@ class PlatformService:
                 )
 
             if context.interaction_mode == "roundtable":
+                active_owner_contract = decompose_user_request(
+                    request.content,
+                ).owner_contract
                 owner_results = [owner_result]
                 assessment = assess_owner_output(
                     owner_result.content,
                     context.turn_owner,
+                    owner_contract=active_owner_contract,
                     max_chars=self.multiagent_contribution_max_chars,
                 )
                 owner_retry_count = 0
@@ -1705,24 +1854,10 @@ class PlatformService:
                     assessment = assess_owner_output(
                         retry_result.content,
                         context.turn_owner,
+                        owner_contract=active_owner_contract,
                         max_chars=(
                             self.multiagent_contribution_max_chars
                         ),
-                    )
-
-                if assessment.status != "success":
-                    error_code = (
-                        "OWNER_REFUSED"
-                        if assessment.status == "refused"
-                        else "OWNER_CONTRACT_VIOLATION"
-                    )
-                    raise LLMProviderError(
-                        error_code,
-                        (
-                            "The coordinator output violated the "
-                            "speaker contract."
-                        ),
-                        retryable=False,
                     )
 
                 owner_result, owner_contract = (
@@ -1730,6 +1865,7 @@ class PlatformService:
                         context,
                         owner_results,
                         assessment,
+                        owner_contract=active_owner_contract,
                         retry_count=owner_retry_count,
                         latency_ms=int(
                             (perf_counter() - owner_started) * 1000
@@ -1764,7 +1900,11 @@ class PlatformService:
                         (perf_counter() - owner_started) * 1000
                     ),
                     "output_normalized": False,
-                    "contract_version": "owner_decision_v2",
+                    "contract_version": "owner_synthesis_v1",
+                    "owner_contract": "factual_summary_v1",
+                    "task_slice_version": "task_slice_v1",
+                    "contributors_preserved": False,
+                    "retry_scope": "owner_only",
                     "budget_exceeded": False,
                 }
 
@@ -1854,16 +1994,39 @@ class PlatformService:
             )
             return
 
+        partial_owner = (
+            owner_contract is not None
+            and owner_contract.get("status") == "partial"
+        )
         assistant_message = self._assistant_message(
             context,
             content,
-            status="success",
+            status="partial" if partial_owner else "success",
+            error_code=(
+                "OWNER_CONTRACT_PARTIAL"
+                if partial_owner
+                else None
+            ),
+            error_message=(
+                "A síntese final foi bloqueada; as contribuições "
+                "validadas foram preservadas."
+                if partial_owner
+                else None
+            ),
         )
         try:
-            completed = self.repository.complete_execution(
-                execution,
-                user_message,
-                assistant_message,
+            completed = (
+                self.repository.partial_execution(
+                    execution,
+                    user_message,
+                    assistant_message,
+                )
+                if partial_owner
+                else self.repository.complete_execution(
+                    execution,
+                    user_message,
+                    assistant_message,
+                )
             )
         except Exception as exc:
             current = self.repository.get_execution(
@@ -1910,7 +2073,11 @@ class PlatformService:
             owner_contract,
         )
         log_execution_event(
-            "execution_terminal_success",
+            (
+                "execution_terminal_partial"
+                if partial_owner
+                else "execution_terminal_success"
+            ),
             completed,
             provider=(
                 owner_result.provider
@@ -1927,7 +2094,7 @@ class PlatformService:
                 item.agent_id for item in contribution_tuple
             ],
             output_normalization=(
-                "speaker_contract_v2"
+                "speaker_contract_v4"
                 if context.interaction_mode == "roundtable"
                 else "not_required"
             ),

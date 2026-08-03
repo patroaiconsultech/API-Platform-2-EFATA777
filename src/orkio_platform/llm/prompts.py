@@ -3,6 +3,10 @@ from __future__ import annotations
 from orkio_platform.domain.models import Agent
 from orkio_platform.knowledge.snapshot import platform_knowledge_prompt
 from orkio_platform.orchestration.contracts import AgentContribution
+from orkio_platform.orchestration.task_decomposition import (
+    OwnerContract,
+    owner_contract_directive,
+)
 
 
 _AGENT_IDENTITY_CONTRACTS = {
@@ -70,11 +74,10 @@ _CONTRIBUTION_FORMAT_CONTRACT = (
     "reasoning."
 )
 
-_OWNER_DECISION_CONTRACT = (
-    "Return only the coordinator decision using these labels: DECISION, "
-    "PRIORITY, NEXT STEP, MAIN RISK, VERDICT. Do not reproduce, quote, "
-    "summarize agent-by-agent, or emit headings named Orkio, Orion, Chris, "
-    "Laura or Team. The runtime renders speaker identity."
+_OWNER_BASE_CONTRACT = (
+    "Do not reproduce, quote or summarize contributors agent-by-agent. "
+    "Do not emit headings or lines named Orkio, Orion, Chris, Laura or Team. "
+    "The runtime renders speaker identity. Recommendations are not executions."
 )
 
 
@@ -113,9 +116,13 @@ def contribution_prompt_for_agent(agent: Agent) -> str:
     return (
         system_prompt_for_agent(agent)
         + " You are contributing one user-visible specialist viewpoint to a "
-        "multi-agent response. Respond only as this agent. Provide a concise, "
-        "high-signal conclusion, evidence available in the request, principal "
-        "risk and recommended action. "
+        "multi-agent response. The user message has already been sliced to your "
+        "exclusive assignment. Respond only as this agent. Provide a concise, "
+        "high-signal response scoped to that assignment. When the exclusive "
+        "assignment requests an exact short output shape, follow that shape "
+        "instead of adding analysis, labels, evidence, risk or recommendations. "
+        "Otherwise provide conclusion, available evidence, principal risk and "
+        "recommended action. "
         + _CONTRIBUTION_FORMAT_CONTRACT
         + " Do not present yourself as the final owner of the turn."
     )
@@ -178,6 +185,7 @@ def synthesis_prompt_for_agent(
 def roundtable_owner_prompt(
     owner: Agent,
     contributions: tuple[AgentContribution, ...],
+    owner_contract: OwnerContract,
 ) -> str:
     peer_context = "\n\n".join(
         _contribution_block(contribution)
@@ -186,14 +194,18 @@ def roundtable_owner_prompt(
     return (
         system_prompt_for_agent(owner)
         + "\n\nThis turn is a visible roundtable. You are the immutable "
-        "coordinator and final speaker after the specialists. Use only "
+        "coordinator and final speaker after the specialists. The user message "
+        "contains only the owner assignment selected by task_slice_v1. Use only "
         "validated contributions. Mention missing or rejected specialist input "
         "only as a limitation. "
-        + _OWNER_DECISION_CONTRACT
-        + " Do not claim implementation or external execution.\n\n"
-        "<roundtable_viewpoints>\n"
-        f"{peer_context}\n"
-        "</roundtable_viewpoints>"
+        + _OWNER_BASE_CONTRACT
+        + " Active owner contract: "
+        + owner_contract
+        + ". "
+        + owner_contract_directive(owner_contract)
+        + "\n\n<roundtable_viewpoints>\n"
+        + peer_context
+        + "\n</roundtable_viewpoints>"
     )
 
 
@@ -201,12 +213,18 @@ def roundtable_owner_retry_prompt(
     owner: Agent,
     contributions: tuple[AgentContribution, ...],
     reason: str,
+    owner_contract: OwnerContract,
 ) -> str:
     return (
-        roundtable_owner_prompt(owner, contributions)
+        roundtable_owner_prompt(
+            owner,
+            contributions,
+            owner_contract,
+        )
         + "\n\nOWNER CONTRACT RETRY (attempt 1 of 1). The previous owner "
-        f"output was rejected for reason={reason}. Return a fresh coordinator "
-        "decision only. Do not mention this retry or any specialist by heading."
+        f"output was rejected for reason={reason}. Produce a fresh response "
+        f"that satisfies {owner_contract}. Do not mention this retry or any "
+        "specialist by name."
     )
 
 

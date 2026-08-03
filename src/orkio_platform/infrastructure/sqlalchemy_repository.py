@@ -84,6 +84,28 @@ class SQLAlchemyRepository:
             rows = connection.execute(statement).mappings().all()
         return [ThreadRecord(**dict(row)) for row in rows]
 
+    def update_thread_title(
+        self,
+        tenant_id: str,
+        thread_id: str,
+        title: str,
+    ) -> ThreadRecord:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(threads)
+                .where(
+                    threads.c.tenant_id == tenant_id,
+                    threads.c.thread_id == thread_id,
+                )
+                .values(title=title)
+            )
+            if result.rowcount != 1:
+                raise NotFoundError(
+                    "THREAD_NOT_FOUND",
+                    "Thread not found.",
+                )
+        return self.get_thread(tenant_id, thread_id)
+
     def add_message(self, message: MessageRecord) -> MessageRecord:
         self.get_thread(message.tenant_id, message.thread_id)
         with self.engine.begin() as connection:
@@ -254,6 +276,37 @@ class SQLAlchemyRepository:
                 status="success",
                 error_code=None,
                 error_message=None,
+                user_message_id=user_message.message_id,
+                assistant_message_id=assistant_message.message_id,
+            )
+        completed = self.get_execution(
+            execution.tenant_id,
+            execution.request_id,
+        )
+        assert completed is not None
+        return completed
+
+    def partial_execution(
+        self,
+        execution: ExecutionRecord,
+        user_message: MessageRecord,
+        assistant_message: MessageRecord,
+    ) -> ExecutionRecord:
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(messages).values(**user_message.model_dump())
+            )
+            connection.execute(
+                insert(messages).values(**assistant_message.model_dump())
+            )
+            if self._failure_injector is not None:
+                self._failure_injector("before_partial_terminal_update")
+            self._terminal_update(
+                connection,
+                execution,
+                status="partial",
+                error_code=assistant_message.error_code,
+                error_message=assistant_message.error_message,
                 user_message_id=user_message.message_id,
                 assistant_message_id=assistant_message.message_id,
             )

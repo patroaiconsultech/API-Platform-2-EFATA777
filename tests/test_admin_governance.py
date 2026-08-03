@@ -61,7 +61,7 @@ def test_admin_overview_exposes_truthful_audit_snapshot(
     body = response.json()
 
     assert body["scope"] == "tenant_only"
-    assert body["runtime"]["release_version"] == "0.6.3"
+    assert body["runtime"]["release_version"] == "0.6.4"
     assert body["runtime"]["execution_graph"] == "trace_lite"
     assert body["runtime"]["voice_webrtc"] == "planned"
     assert body["capability_summary"]["available"] >= 4

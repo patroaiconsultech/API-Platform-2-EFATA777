@@ -16,6 +16,7 @@ from orkio_platform.domain.models import (
     RecoveryDecisionRecord,
 )
 from orkio_platform.infrastructure.repositories import repository
+from orkio_platform.knowledge.snapshot import KNOWLEDGE_SNAPSHOT_VERSION
 from orkio_platform.llm.factory import build_llm_provider
 from orkio_platform.orchestration.capabilities import list_capabilities
 from orkio_platform.version import (
@@ -59,9 +60,11 @@ def governance_status(
         "execution_graph": "trace_lite",
         "capability_registry_entries": len(list_capabilities()),
         "capability_registry_contract": "evidence_aware_v1",
-        "roundtable_output_normalization": "speaker_contract_v3",
-        "owner_decision_contract": "owner_decision_v3",
-        "knowledge_snapshot_version": "orkio-platform-r063-v1",
+        "roundtable_output_normalization": "speaker_contract_v4",
+        "owner_contract": "adaptive_owner_contract_v1",
+        "task_decomposition": "task_slice_v1",
+        "partial_owner_preservation": True,
+        "knowledge_snapshot_version": KNOWLEDGE_SNAPSHOT_VERSION,
         "multiagent_budget": {
             "contribution_max_chars": (
                 settings.multiagent_contribution_max_chars

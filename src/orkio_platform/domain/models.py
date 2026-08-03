@@ -15,7 +15,7 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
 
 
-ExecutionStatus = Literal["running", "success", "error", "cancelled"]
+ExecutionStatus = Literal["running", "success", "partial", "error", "cancelled"]
 RecoveryDecision = Literal["retry", "cancel", "abandon"]
 InteractionMode = Literal["single", "team_synthesis", "roundtable"]
 
@@ -61,7 +61,7 @@ class MessageRecord(BaseModel):
     request_id: str | None = None
     execution_id: str | None = None
     route_family: str | None = None
-    status: Literal["success", "error", "cancelled"] | None = None
+    status: Literal["success", "partial", "error", "cancelled"] | None = None
     error_code: str | None = None
     error_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -146,7 +146,7 @@ class ResponseEnvelope(BaseModel):
     route_family: str
     interaction_mode: InteractionMode = "single"
     content: str
-    status: Literal["success", "error", "cancelled"]
+    status: Literal["success", "partial", "error", "cancelled"]
     error: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
     execution_trace: list[dict[str, Any]] | None = None
@@ -173,6 +173,10 @@ class ResponseEnvelope(BaseModel):
 
 
 class ThreadCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+
+class ThreadUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=160)
 
 

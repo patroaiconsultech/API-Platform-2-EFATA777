@@ -1,7 +1,7 @@
 {
-  "release_id": "ORKIO-PREMIUM-AGENT-INTEGRITY-R0-6-3",
-  "display_version": "R0.6.3",
-  "release_version": "0.6.3",
+  "release_id": "ORKIO-PREMIUM-DEMO-EXCELLENCE-R0-6-4",
+  "display_version": "R0.6.4",
+  "release_version": "0.6.4",
   "component": "backend",
   "channel": "audit-candidate"
 }

@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from orkio_platform.orchestration.task_decomposition import OwnerContract
+
 
 AgentOutputStatus = Literal[
     "success",
@@ -21,6 +23,14 @@ _AGENT_HEADING_RE = re.compile(
     r"[ \t]*"
     r"(?:(?P<separator>:|[-–—])[ \t]*(?P<suffix>[^\n]*))?"
     r"[ \t]*$"
+)
+_AGENT_LINE_MARKER_RE = re.compile(
+    r"(?im)^[ \t]{0,3}"
+    r"(?:#{1,6}[ \t]*)?"
+    r"(?:\*\*|__)?"
+    r"@?(?P<agent>Orkio|Orion|Chris|Laura|Team)"
+    r"(?:\*\*|__)?"
+    r"(?P<suffix>[ \t]+[^\n]+|[ \t]*(?::|[-–—])[^\n]*)$"
 )
 _EXCESS_BLANK_LINES_RE = re.compile(r"\n{3,}")
 _GENERIC_REFUSAL_RE = re.compile(
@@ -52,6 +62,22 @@ _OWNER_LABELS = {
         r"(?:NEXT[ \t]+STEP|PRÓXIMO[ \t]+PASSO|PROXIMO[ \t]+PASSO)"
         r"(?:\*\*|__)?[ \t]*(?::|[-–—])?"
     ),
+    "risk": re.compile(
+        r"(?im)\b(?:MAIN[ \t]+RISK|RISCO[ \t]+PRINCIPAL|RISKS?|RISCOS?)\b"
+    ),
+    "classification": re.compile(
+        r"(?im)\b(?:comprovado|planejado|não[ \t]+conectado|nao[ \t]+conectado|"
+        r"não[ \t]+comprovado|nao[ \t]+comprovado|available|planned|"
+        r"not[ \t]+connected|not[ \t]+proven)\b"
+    ),
+}
+
+_OWNER_CONTRACT_VERSIONS: dict[OwnerContract, str] = {
+    "decision_v1": "owner_decision_v4",
+    "classification_v1": "owner_classification_v1",
+    "factual_summary_v1": "owner_factual_summary_v1",
+    "short_ack_v1": "owner_short_ack_v1",
+    "risk_assessment_v1": "owner_risk_assessment_v1",
 }
 
 
@@ -64,7 +90,7 @@ class AgentOutputAssessment:
     cross_agent_headings: tuple[str, ...]
     generic_refusal: bool
     truncated: bool
-    contract_version: str = "speaker_contract_v3"
+    contract_version: str = "speaker_contract_v4"
 
     @property
     def retryable_contract_failure(self) -> bool:
@@ -84,8 +110,6 @@ def _clean_text(value: str) -> str:
 
 
 def _inline_content(match: re.Match[str]) -> str:
-    """Preserve plain ``Agent: content`` while treating markdown suffixes as titles."""
-
     if match.group("markdown"):
         return ""
     if match.group("separator") != ":":
@@ -123,6 +147,21 @@ def _sections(
     return prefix, sections, matches
 
 
+def _cross_agent_markers(
+    content: str,
+    agent_id: str,
+) -> tuple[str, ...]:
+    observed: list[str] = []
+    for pattern in (_AGENT_HEADING_RE, _AGENT_LINE_MARKER_RE):
+        for match in pattern.finditer(content):
+            marker = match.group("agent")
+            if marker.casefold() == agent_id.casefold():
+                continue
+            if marker not in observed:
+                observed.append(marker)
+    return tuple(observed)
+
+
 def _extract_viewpoint(
     content: str,
     agent_id: str,
@@ -133,7 +172,12 @@ def _extract_viewpoint(
 
     prefix, sections, matches = _sections(cleaned)
     if not matches:
-        return cleaned, (), False, 0
+        return (
+            cleaned,
+            _cross_agent_markers(cleaned, agent_id),
+            False,
+            0,
+        )
 
     own_sections = [
         section.content
@@ -141,13 +185,16 @@ def _extract_viewpoint(
         if section.agent_id.casefold() == agent_id.casefold()
         and section.content
     ]
-    cross = tuple(
+    cross = list(
         dict.fromkeys(
             section.agent_id
             for section in sections
             if section.agent_id.casefold() != agent_id.casefold()
         )
     )
+    for marker in _cross_agent_markers(cleaned, agent_id):
+        if marker not in cross:
+            cross.append(marker)
 
     if own_sections:
         selected = own_sections[0]
@@ -157,7 +204,7 @@ def _extract_viewpoint(
         selected = ""
 
     selected = _AGENT_HEADING_RE.sub("", selected)
-    return _clean_text(selected), cross, True, len(own_sections)
+    return _clean_text(selected), tuple(cross), True, len(own_sections)
 
 
 def is_generic_refusal(content: str) -> bool:
@@ -173,8 +220,6 @@ def assess_agent_output(
     *,
     max_chars: int = 4_000,
 ) -> AgentOutputAssessment:
-    """Validate one model output against the canonical speaker contract."""
-
     cleaned = _clean_text(content)
     selected, cross, heading_found, own_count = _extract_viewpoint(
         content,
@@ -264,37 +309,68 @@ def assess_agent_output(
     )
 
 
+def _owner_missing_fields(
+    content: str,
+    contract: OwnerContract,
+) -> list[str]:
+    if contract == "decision_v1":
+        required = ("decision", "priority", "next_step")
+    elif contract == "classification_v1":
+        required = ("classification",)
+    elif contract == "risk_assessment_v1":
+        required = ("risk",)
+    else:
+        required = ()
+
+    return [
+        label
+        for label in required
+        if not _OWNER_LABELS[label].search(content)
+    ]
+
+
 def assess_owner_output(
     content: str,
     agent_id: str,
     *,
+    owner_contract: OwnerContract = "decision_v1",
     max_chars: int = 4_000,
 ) -> AgentOutputAssessment:
-    """Validate speaker isolation plus the minimum coordinator decision shape."""
-
     assessment = assess_agent_output(
         content,
         agent_id,
         max_chars=max_chars,
     )
+    contract_version = _OWNER_CONTRACT_VERSIONS[owner_contract]
     if assessment.status != "success":
-        return assessment
+        return AgentOutputAssessment(
+            content=assessment.content,
+            status=assessment.status,
+            reason=assessment.reason,
+            normalized=assessment.normalized,
+            cross_agent_headings=assessment.cross_agent_headings,
+            generic_refusal=assessment.generic_refusal,
+            truncated=assessment.truncated,
+            contract_version=contract_version,
+        )
 
-    missing = [
-        label
-        for label, pattern in _OWNER_LABELS.items()
-        if not pattern.search(assessment.content)
-    ]
+    missing = _owner_missing_fields(
+        assessment.content,
+        owner_contract,
+    )
     if missing:
         return AgentOutputAssessment(
             content="",
             status="contract_violation",
-            reason="owner_decision_fields_missing:" + ",".join(missing),
+            reason=(
+                f"{owner_contract}_fields_missing:"
+                + ",".join(missing)
+            ),
             normalized=assessment.normalized,
             cross_agent_headings=(),
             generic_refusal=False,
             truncated=assessment.truncated,
-            contract_version="owner_decision_v3",
+            contract_version=contract_version,
         )
 
     return AgentOutputAssessment(
@@ -305,7 +381,7 @@ def assess_owner_output(
         cross_agent_headings=(),
         generic_refusal=False,
         truncated=assessment.truncated,
-        contract_version="owner_decision_v3",
+        contract_version=contract_version,
     )
 
 
@@ -315,8 +391,6 @@ def normalize_agent_viewpoint(
     *,
     max_chars: int = 8_000,
 ) -> str:
-    """Best-effort legacy extractor; new orchestration uses assessment APIs."""
-
     selected, _cross, _heading_found, _own_count = _extract_viewpoint(
         content,
         agent_id,
@@ -328,7 +402,4 @@ def normalize_agent_viewpoint(
 
 
 def contains_cross_agent_heading(content: str, agent_id: str) -> bool:
-    return any(
-        match.group("agent").casefold() != agent_id.casefold()
-        for match in _AGENT_HEADING_RE.finditer(content)
-    )
+    return bool(_cross_agent_markers(content, agent_id))

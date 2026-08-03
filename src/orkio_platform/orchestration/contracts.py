@@ -65,6 +65,9 @@ class AgentContribution:
     output_normalized: bool = False
     budget_exceeded: bool = False
     contract_version: str = "agent_contribution_v2"
+    assigned_task: str | None = None
+    task_slice_version: str | None = None
+    explicit_assignment: bool = False
 
     def token_usage(self) -> dict[str, int] | None:
         values = {

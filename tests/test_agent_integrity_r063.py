@@ -75,7 +75,7 @@ def test_speaker_contract_accepts_heading_variants(
     assessment = assess_agent_output(content, agent_id)
     assert assessment.status == "success"
     assert assessment.content == expected
-    assert assessment.contract_version == "speaker_contract_v3"
+    assert assessment.contract_version == "speaker_contract_v4"
 
 
 def test_cross_agent_heading_is_rejected_not_silently_extracted():
@@ -125,7 +125,7 @@ def test_owner_requires_decision_priority_and_next_step():
         "Orkio",
     )
     assert missing.status == "contract_violation"
-    assert missing.reason.startswith("owner_decision_fields_missing:")
+    assert missing.reason.startswith("decision_v1_fields_missing:")
 
     valid = assess_owner_output(
         (
@@ -138,7 +138,7 @@ def test_owner_requires_decision_priority_and_next_step():
         "Orkio",
     )
     assert valid.status == "success"
-    assert valid.contract_version == "owner_decision_v3"
+    assert valid.contract_version == "owner_decision_v4"
 
 
 class ScriptedProvider:
@@ -357,7 +357,7 @@ def test_owner_recursion_gets_one_retry_and_clean_decision():
     assert "### ORION — TECH" not in response.content
 
 
-def test_owner_persistent_violation_fails_turn():
+def test_owner_persistent_violation_preserves_contributors_as_partial():
     contaminated = (
         "### ORION — TECH\nTechnical.\n\n"
         "### ORKIO — OWNER\nDecision."
@@ -383,8 +383,14 @@ def test_owner_persistent_violation_fails_turn():
         ),
     )
 
-    assert response.status == "error"
-    assert response.error["code"] == "OWNER_CONTRACT_VIOLATION"
+    assert response.status == "partial"
+    assert response.error["code"] == "OWNER_CONTRACT_PARTIAL"
+    assert response.owner_contract["status"] == "partial"
+    assert response.owner_contract["retry_count"] == 1
+    assert response.owner_contract["contributors_preserved"] is True
+    assert "Technical." in response.content
+    assert "Commercial." in response.content
+    assert "Experience." in response.content
 
 
 def test_multiagent_request_applies_history_context_and_output_budgets():
@@ -493,7 +499,7 @@ def test_sse_done_payload_matches_wire_sequence():
 
 
 def test_knowledge_snapshot_is_versioned_read_only_and_honest():
-    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r063-v1"
+    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r064-v1"
     assert KNOWLEDGE_SNAPSHOT["source_commit"] == "NOT_PROVEN"
     assert "persistent execution graph" in (
         KNOWLEDGE_SNAPSHOT["planned_not_connected"]

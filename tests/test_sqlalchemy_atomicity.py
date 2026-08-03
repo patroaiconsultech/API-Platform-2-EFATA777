@@ -154,3 +154,62 @@ def test_tenant_request_id_is_unique(tmp_path):
     existing, created = repository.reserve_execution(duplicate)
     assert created is False
     assert existing.execution_id == "execution-1"
+
+
+def test_partial_completion_is_atomic(tmp_path):
+    repository = build_repository(tmp_path / "partial.sqlite")
+    execution = seed_execution(repository)
+    user, assistant = messages_for(execution)
+    partial_message = assistant.model_copy(
+        update={
+            "status": "partial",
+            "content": "Contribuições preservadas.",
+            "error_code": "OWNER_CONTRACT_PARTIAL",
+            "error_message": "Owner synthesis was blocked.",
+        }
+    )
+
+    completed = repository.partial_execution(
+        execution,
+        user,
+        partial_message,
+    )
+
+    assert completed.status == "partial"
+    assert completed.error_code == "OWNER_CONTRACT_PARTIAL"
+    assert [
+        item.status
+        for item in repository.list_messages("tenant-a", "thread-1")
+    ] == ["success", "partial"]
+
+
+def test_partial_failure_rolls_back_messages(tmp_path):
+    def fail(stage: str) -> None:
+        if stage == "before_partial_terminal_update":
+            raise RuntimeError("partial injected")
+
+    repository = build_repository(
+        tmp_path / "partial-rollback.sqlite",
+        failure_injector=fail,
+    )
+    execution = seed_execution(repository)
+    user, assistant = messages_for(execution)
+    partial_message = assistant.model_copy(
+        update={
+            "status": "partial",
+            "error_code": "OWNER_CONTRACT_PARTIAL",
+            "error_message": "Owner synthesis was blocked.",
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="partial injected"):
+        repository.partial_execution(
+            execution,
+            user,
+            partial_message,
+        )
+
+    assert repository.list_messages("tenant-a", "thread-1") == []
+    current = repository.get_execution("tenant-a", "request-1")
+    assert current is not None
+    assert current.status == "running"

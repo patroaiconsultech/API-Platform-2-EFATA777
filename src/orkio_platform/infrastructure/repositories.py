@@ -88,6 +88,24 @@ class InMemoryRepository:
                 reverse=True,
             )
 
+    def update_thread_title(
+        self,
+        tenant_id: str,
+        thread_id: str,
+        title: str,
+    ) -> ThreadRecord:
+        with self._lock:
+            key = (tenant_id, thread_id)
+            current = self._threads.get(key)
+            if current is None:
+                raise NotFoundError(
+                    "THREAD_NOT_FOUND",
+                    "Thread not found.",
+                )
+            updated = current.model_copy(update={"title": title})
+            self._threads[key] = updated
+            return updated
+
     def _append_message_locked(self, message: MessageRecord) -> None:
         key = (message.tenant_id, message.message_id)
         if key in self._messages_by_id:
@@ -242,6 +260,42 @@ class InMemoryRepository:
             completed = current.model_copy(
                 update={
                     "status": "success",
+                    "user_message_id": user_message.message_id,
+                    "assistant_message_id": assistant_message.message_id,
+                    "completed_at": utc_now(),
+                }
+            )
+            self._executions[
+                (execution.tenant_id, execution.request_id)
+            ] = completed
+            return completed
+
+    def partial_execution(
+        self,
+        execution: ExecutionRecord,
+        user_message: MessageRecord,
+        assistant_message: MessageRecord,
+    ) -> ExecutionRecord:
+        with self._lock:
+            current = self._require_running_locked(execution)
+            self.get_thread(execution.tenant_id, execution.thread_id)
+            self._append_message_locked(user_message)
+            try:
+                self._append_message_locked(assistant_message)
+            except Exception:
+                self._messages[
+                    (user_message.tenant_id, user_message.thread_id)
+                ].remove(user_message)
+                self._messages_by_id.pop(
+                    (user_message.tenant_id, user_message.message_id),
+                    None,
+                )
+                raise
+            completed = current.model_copy(
+                update={
+                    "status": "partial",
+                    "error_code": assistant_message.error_code,
+                    "error_message": assistant_message.error_message,
                     "user_message_id": user_message.message_id,
                     "assistant_message_id": assistant_message.message_id,
                     "completed_at": utc_now(),

@@ -288,6 +288,37 @@ def stream_chat(
             )
             return
 
+        if response.status == "partial":
+            yield emit(
+                "partial",
+                {
+                    "message": response.model_dump(mode="json"),
+                    "message_id": response.message_id,
+                    "reason": (
+                        response.error or {}
+                    ).get("code", "EXECUTION_PARTIAL"),
+                    "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
+                },
+            )
+            yield emit(
+                "done",
+                {
+                    "outcome": "partial",
+                    "message_id": response.message_id,
+                    "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
+                    "done_observed": True,
+                    "event_count": sequence + 1,
+                    "last_event_id": (
+                        f"{context.execution_id}:{sequence + 1}"
+                    ),
+                },
+            )
+            return
+
         if response.status == "error":
             yield emit(
                 "error",
