@@ -499,7 +499,7 @@ def test_sse_done_payload_matches_wire_sequence():
 
 
 def test_knowledge_snapshot_is_versioned_read_only_and_honest():
-    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r064-v1"
+    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r065-v1"
     assert KNOWLEDGE_SNAPSHOT["source_commit"] == "NOT_PROVEN"
     assert "persistent execution graph" in (
         KNOWLEDGE_SNAPSHOT["planned_not_connected"]

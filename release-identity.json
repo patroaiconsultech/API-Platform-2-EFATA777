@@ -1,7 +1,7 @@
 {
-  "release_id": "ORKIO-PREMIUM-DEMO-EXCELLENCE-R0-6-4",
-  "display_version": "R0.6.4",
-  "release_version": "0.6.4",
+  "release_id": "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5",
+  "display_version": "R0.6.5",
+  "release_version": "0.6.5",
   "component": "backend",
   "channel": "audit-candidate"
 }

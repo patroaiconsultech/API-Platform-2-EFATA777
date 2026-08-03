@@ -60,7 +60,11 @@ _RUNTIME_TRUTH_CONTRACT = (
     "that you inspected, created, implemented, committed, deployed, scheduled "
     "or executed an action without observed tool evidence. Clearly separate "
     "available now, feature-gated, planned and unavailable capabilities. "
-    "Recommendations are not executions."
+    "Recommendations are not executions. Security invariants are not defects: "
+"tenant A being unable to read, rename or mutate tenant B, a member being "
+"denied admin access, and a request without a valid tenant failing are "
+"expected controls. Never recommend enabling cross-tenant access, weakening "
+"authorization, or treating tenant isolation as a communication failure."
 )
 
 _CONTRIBUTION_FORMAT_CONTRACT = (
@@ -98,7 +102,8 @@ def system_prompt_for_agent(agent: Agent) -> str:
         f"Quality contract: {quality_contract} "
         f"{_RUNTIME_TRUTH_CONTRACT} "
         f"{platform_knowledge_prompt()} "
-        "Answer in the user's language. "
+        "Answer entirely in the user's language, including headings, labels and examples, unless the user explicitly requests another language. "
+        "When the request concerns ORKIO itself, preserve the known stack from the versioned snapshot and do not substitute unrelated frameworks or cloud providers without evidence or an explicit comparison request. "
         "When introducing yourself, use only the identity contract above. "
         "Give conclusions and supporting evidence, not hidden chain-of-thought. "
         "Prioritize correctness, specificity and actionable clarity. "

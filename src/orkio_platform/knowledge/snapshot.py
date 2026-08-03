@@ -3,18 +3,19 @@ from __future__ import annotations
 from typing import Final
 
 
-KNOWLEDGE_SNAPSHOT_VERSION: Final = "orkio-platform-r064-v1"
+KNOWLEDGE_SNAPSHOT_VERSION: Final = "orkio-platform-r065-v1"
 
 KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
     "version": KNOWLEDGE_SNAPSHOT_VERSION,
-    "release_id": "ORKIO-PREMIUM-DEMO-EXCELLENCE-R0-6-4",
+    "release_id": "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5",
     "generated_at": "2026-08-03",
     "source_documents": (
         "PROTOCOLO MESTRE DANIEL",
         "MEMÓRIA TÉCNICA INICIAL — AGENTE DANIEL",
         "R0.6.3 runtime speaker-contract and SSE evidence",
         "AO-01 superseding audit verdict",
-        "R0.6.4 local task-decomposition patch evidence",
+        "R0.6.4 runtime golden-demo and task-decomposition evidence",
+        "R0.6.5 responsive containment and tenant-truth patch evidence",
     ),
     "source_commit": "NOT_PROVEN",
     "facts": (
@@ -24,8 +25,11 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "Persistence, SSE and frontend must share canonical identity.",
         "Every SSE flow ends with done or error plus done.",
         "Current multiagent modes are single, team_synthesis and roundtable.",
-        "R0.6.4 candidate isolates explicit tasks with task_slice_v1.",
-        "R0.6.4 candidate uses adaptive owner contracts by intent.",
+        "The current known ORKIO stack is React/Vite, FastAPI, PostgreSQL, OpenAI Responses and textual SSE.",
+        "Tenant A being unable to read, rename or mutate tenant B is an expected security invariant, not a defect.",
+        "A member being denied administrative access and a request without a valid tenant failing are expected security controls.",
+        "R0.6.4 and later candidates isolate explicit tasks with task_slice_v1.",
+        "R0.6.4 and later candidates use adaptive owner contracts by intent.",
         "A failed owner synthesis may preserve contributors as partial.",
         "The current execution trace is trace_lite, not a persistent graph.",
         "Assisted evolution is proposal_only and disabled by default.",
@@ -44,7 +48,7 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "This snapshot is read-only and may be stale.",
         "It is not live repository, database, log or deployment access.",
         "Current runtime evidence overrides this snapshot.",
-        "R0.6.4 features are local candidate capabilities until deployed.",
+        "R0.6.5 features are local candidate capabilities until deployed.",
         "source_commit is not proven in this local artifact.",
     ),
 }
