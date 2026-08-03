@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from datetime import timedelta, timezone
 from time import perf_counter
 
 from orkio_platform.application.catalog import resolve_agent
+from orkio_platform.application.streaming import TurnStreamSignal
+from orkio_platform.llm.contracts import (
+    LLMCompletionRequest,
+    LLMMessage,
+    LLMProvider,
+    LLMProviderError,
+    LLMResult,
+    LLMStreamEvent,
+)
+from orkio_platform.llm.deterministic import (
+    DeterministicLLMProvider,
+)
+from orkio_platform.llm.prompts import (
+    contribution_prompt_for_agent,
+    synthesis_prompt_for_agent,
+    system_prompt_for_agent,
+)
 from orkio_platform.domain.errors import (
     ConflictError,
     NotFoundError,
@@ -28,6 +46,8 @@ from orkio_platform.infrastructure.repository_protocol import (
     RepositoryProtocol,
 )
 from orkio_platform.observability.execution import log_execution_event
+from orkio_platform.orchestration.contracts import AgentContribution
+from orkio_platform.orchestration.router import build_orchestration_plan
 
 
 class PlatformService:
@@ -37,6 +57,17 @@ class PlatformService:
         *,
         execution_lease_seconds: int = 60,
         execution_stale_after_seconds: int = 300,
+        llm_provider: LLMProvider | None = None,
+        llm_history_messages: int = 20,
+        llm_max_context_chars: int = 100_000,
+        realtime_streaming_enabled: bool = False,
+        multiagent_enabled: bool = False,
+        multiagent_max_contributors: int = 2,
+        multiagent_team_agents: tuple[str, ...] = (
+            "Orion",
+            "Chris",
+            "Laura",
+        ),
     ) -> None:
         if execution_lease_seconds <= 0:
             raise ValueError("EXECUTION_LEASE_THRESHOLD_INVALID")
@@ -47,6 +78,21 @@ class PlatformService:
         self.execution_stale_after_seconds = (
             execution_stale_after_seconds
         )
+        if llm_history_messages < 0:
+            raise ValueError("LLM_HISTORY_MESSAGES_INVALID")
+        if llm_max_context_chars < 1_000:
+            raise ValueError("LLM_MAX_CONTEXT_CHARS_INVALID")
+        self.llm_provider = (
+            llm_provider or DeterministicLLMProvider()
+        )
+        self.llm_history_messages = llm_history_messages
+        self.llm_max_context_chars = llm_max_context_chars
+        if multiagent_max_contributors < 0:
+            raise ValueError("MULTIAGENT_MAX_CONTRIBUTORS_INVALID")
+        self.realtime_streaming_enabled = realtime_streaming_enabled
+        self.multiagent_enabled = multiagent_enabled
+        self.multiagent_max_contributors = multiagent_max_contributors
+        self.multiagent_team_agents = multiagent_team_agents
 
     def create_thread(
         self,
@@ -87,22 +133,27 @@ class PlatformService:
             principal.tenant_id,
             request.thread_id,
         )
-        agent = resolve_agent(request.requested_agent)
+        plan = build_orchestration_plan(
+            request.requested_agent,
+            request.content,
+            enabled=self.multiagent_enabled,
+            max_contributors=self.multiagent_max_contributors,
+            team_agents=self.multiagent_team_agents,
+        )
+        owner = resolve_agent(plan.owner_agent)
         return AgentTurnContext(
             request_id=request.request_id or new_id("request"),
             execution_id=new_id("execution"),
             thread_id=request.thread_id,
             tenant_id=principal.tenant_id,
             user_id=principal.user_id,
-            requested_agent=request.requested_agent or agent.agent_id,
-            resolved_agent=agent.agent_id,
-            turn_owner=agent.agent_id,
-            display_agent=agent.display_name,
-            route_family=(
-                "explicit_agent"
-                if request.requested_agent
-                else "default_orchestrator"
-            ),
+            requested_agent=plan.requested_agent,
+            resolved_agent=owner.agent_id,
+            turn_owner=owner.agent_id,
+            display_agent=owner.display_name,
+            route_family=plan.route_family,
+            contributing_agents=plan.contributors,
+            trace_kind=plan.trace_kind,
         )
 
     @staticmethod
@@ -115,6 +166,9 @@ class PlatformService:
             "user_id": context.user_id,
             "requested_agent": context.requested_agent,
             "resolved_agent": context.resolved_agent,
+            "turn_owner": context.turn_owner,
+            "contributing_agents": context.contributing_agents,
+            "route_family": context.route_family,
             "content": request.content,
             "simulate_error": request.simulate_error,
         }
@@ -278,15 +332,247 @@ class PlatformService:
             error_message=error_message,
         )
 
-    def deterministic_content(
+    def _history_messages(
         self,
         context: AgentTurnContext,
-    ) -> str:
-        return (
-            f"[{context.display_agent}] Recebi sua mensagem no tenant "
-            f"{context.tenant_id}. RC1 Premium Hardening R0.3 opera "
-            "com provider determinístico local."
+        request: ChatRequest,
+    ) -> tuple[LLMMessage, ...]:
+        persisted = self.repository.list_messages(
+            context.tenant_id,
+            context.thread_id,
         )
+        eligible = [
+            LLMMessage(
+                role=message.role,
+                content=message.content,
+            )
+            for message in persisted
+            if message.role in {"user", "assistant"}
+            and message.content.strip()
+            and message.status not in {"error", "cancelled"}
+        ]
+        if self.llm_history_messages == 0:
+            eligible = []
+        else:
+            eligible = eligible[-self.llm_history_messages :]
+
+        current = LLMMessage(
+            role="user",
+            content=request.content,
+        )
+        selected: list[LLMMessage] = [current]
+        used_chars = len(current.content)
+
+        for message in reversed(eligible):
+            message_chars = len(message.content)
+            if used_chars + message_chars > self.llm_max_context_chars:
+                break
+            selected.append(message)
+            used_chars += message_chars
+
+        selected.reverse()
+        return tuple(selected)
+
+    def _llm_request_for_agent(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+        *,
+        agent_id: str,
+        system_prompt: str,
+    ) -> LLMCompletionRequest:
+        agent = resolve_agent(agent_id)
+        return LLMCompletionRequest(
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            thread_id=context.thread_id,
+            agent_id=agent.agent_id,
+            display_name=agent.display_name,
+            system_prompt=system_prompt,
+            messages=self._history_messages(context, request),
+        )
+
+    def _contribution_request(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+        contributor_id: str,
+    ) -> LLMCompletionRequest:
+        contributor = resolve_agent(contributor_id)
+        return self._llm_request_for_agent(
+            context,
+            request,
+            agent_id=contributor.agent_id,
+            system_prompt=contribution_prompt_for_agent(contributor),
+        )
+
+    def _owner_request(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+        contributions: tuple[AgentContribution, ...],
+    ) -> LLMCompletionRequest:
+        owner = resolve_agent(context.turn_owner)
+        return self._llm_request_for_agent(
+            context,
+            request,
+            agent_id=owner.agent_id,
+            system_prompt=synthesis_prompt_for_agent(
+                owner,
+                contributions,
+            ),
+        )
+
+    @staticmethod
+    def _contribution_from_result(
+        agent_id: str,
+        result: LLMResult,
+    ) -> AgentContribution:
+        agent = resolve_agent(agent_id)
+        return AgentContribution(
+            agent_id=agent.agent_id,
+            display_name=agent.display_name,
+            content=result.content,
+            provider=result.provider,
+            model=result.model,
+            response_id=result.response_id,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            total_tokens=result.total_tokens,
+        )
+
+    def generate_contributions(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+    ) -> tuple[AgentContribution, ...]:
+        contributions: list[AgentContribution] = []
+        for contributor_id in context.contributing_agents:
+            result = self.llm_provider.complete(
+                self._contribution_request(
+                    context,
+                    request,
+                    contributor_id,
+                )
+            )
+            contributions.append(
+                self._contribution_from_result(
+                    contributor_id,
+                    result,
+                )
+            )
+        return tuple(contributions)
+
+    def generate_content(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+    ) -> tuple[LLMResult, tuple[AgentContribution, ...]]:
+        contributions = self.generate_contributions(
+            context,
+            request,
+        )
+        result = self.llm_provider.complete(
+            self._owner_request(
+                context,
+                request,
+                contributions,
+            )
+        )
+        return result, contributions
+
+    @staticmethod
+    def _aggregate_token_usage(
+        contributions: tuple[AgentContribution, ...],
+        owner_result: LLMResult | None,
+    ) -> dict[str, int] | None:
+        totals = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        observed = False
+        for usage in [
+            *(item.token_usage() for item in contributions),
+            (
+                owner_result.token_usage()
+                if owner_result is not None
+                else None
+            ),
+        ]:
+            if usage is None:
+                continue
+            observed = True
+            for key in totals:
+                value = usage.get(key)
+                if isinstance(value, int):
+                    totals[key] += value
+        return totals if observed else None
+
+    @staticmethod
+    def _execution_trace(
+        context: AgentTurnContext,
+        contributions: tuple[AgentContribution, ...],
+        owner_result: LLMResult | None,
+    ) -> list[dict[str, object]]:
+        trace: list[dict[str, object]] = []
+        for index, item in enumerate(contributions):
+            trace.append(
+                {
+                    "node_id": (
+                        f"{context.execution_id}:contributor:{index}"
+                    ),
+                    "agent_id": item.agent_id,
+                    "role": "contributor",
+                    "status": "success",
+                    "trace_kind": context.trace_kind,
+                    "provider": item.provider,
+                    "model": item.model,
+                    "token_usage": item.token_usage(),
+                }
+            )
+        trace.append(
+            {
+                "node_id": f"{context.execution_id}:owner",
+                "agent_id": context.turn_owner,
+                "role": "owner",
+                "status": (
+                    "success"
+                    if owner_result is not None
+                    else "unknown"
+                ),
+                "trace_kind": context.trace_kind,
+                "provider": (
+                    owner_result.provider
+                    if owner_result is not None
+                    else self.llm_provider.provider_name
+                ),
+                "model": (
+                    owner_result.model
+                    if owner_result is not None
+                    else self.llm_provider.model_name
+                ),
+                "token_usage": (
+                    owner_result.token_usage()
+                    if owner_result is not None
+                    else None
+                ),
+            }
+        )
+        return trace
+
+    def _provider_stream(
+        self,
+        request: LLMCompletionRequest,
+    ) -> Iterator[LLMStreamEvent]:
+        stream_method = getattr(self.llm_provider, "stream", None)
+        if callable(stream_method):
+            yield from stream_method(request)
+            return
+
+        result = self.llm_provider.complete(request)
+        yield LLMStreamEvent.text_delta(result.content)
+        yield LLMStreamEvent.completed(result)
 
     def response_from_execution(
         self,
@@ -389,8 +675,43 @@ class PlatformService:
                 False,
             )
 
+        provider_result: LLMResult | None = None
+        contributions: tuple[AgentContribution, ...] = ()
         try:
-            content = self.deterministic_content(context)
+            provider_result, contributions = self.generate_content(
+                context,
+                request,
+            )
+            content = provider_result.content
+        except LLMProviderError as exc:
+            terminal_message = self._assistant_message(
+                context,
+                "",
+                status="error",
+                error_code=exc.code,
+                error_message=exc.safe_message,
+            )
+            failed = self.repository.fail_execution(
+                execution,
+                user_message,
+                terminal_message,
+            )
+            log_execution_event(
+                "execution_terminal_error",
+                failed,
+                error_code=failed.error_code,
+                provider=self.llm_provider.provider_name,
+                retryable=exc.retryable,
+            )
+            return (
+                self.response_from_execution(
+                    failed,
+                    latency_ms=int(
+                        (perf_counter() - started) * 1000
+                    ),
+                ),
+                False,
+            )
         except Exception:
             terminal_message = self._assistant_message(
                 context,
@@ -408,6 +729,7 @@ class PlatformService:
                 "execution_terminal_error",
                 failed,
                 error_code=failed.error_code,
+                provider=self.llm_provider.provider_name,
             )
             return (
                 self.response_from_execution(
@@ -481,16 +803,419 @@ class PlatformService:
                 "The turn could not be persisted atomically.",
             ) from exc
 
+        token_usage = self._aggregate_token_usage(
+            contributions,
+            provider_result,
+        )
+        execution_trace = self._execution_trace(
+            context,
+            contributions,
+            provider_result,
+        )
         log_execution_event(
             "execution_terminal_success",
             completed,
-        )
-        return (
-            self.response_from_execution(
-                completed,
-                latency_ms=int((perf_counter() - started) * 1000),
+            provider=(
+                provider_result.provider
+                if provider_result is not None
+                else self.llm_provider.provider_name
             ),
-            False,
+            model=(
+                provider_result.model
+                if provider_result is not None
+                else self.llm_provider.model_name
+            ),
+            token_usage=token_usage,
+            provider_response_id=(
+                provider_result.response_id
+                if provider_result is not None
+                else None
+            ),
+        )
+        response = self.response_from_execution(
+            completed,
+            latency_ms=int((perf_counter() - started) * 1000),
+        )
+        response_updates: dict[str, object] = {
+            "execution_trace": execution_trace,
+        }
+        if token_usage is not None:
+            response_updates["token_usage"] = token_usage
+        response = response.model_copy(update=response_updates)
+        return (response, False)
+
+
+    def stream_reserved_turn(
+        self,
+        context: AgentTurnContext,
+        execution: ExecutionRecord,
+        request: ChatRequest,
+        *,
+        created: bool,
+        started: float,
+    ) -> Iterator[TurnStreamSignal]:
+        if not created:
+            response = self.response_from_execution(
+                execution,
+                latency_ms=int((perf_counter() - started) * 1000),
+            )
+            if response.status == "success" and response.content:
+                yield TurnStreamSignal(
+                    kind="delta",
+                    payload={
+                        "content": response.content,
+                        "chunk_index": 0,
+                        "replayed": True,
+                    },
+                )
+            yield TurnStreamSignal(
+                kind="terminal",
+                payload={"replayed": True},
+                response=response,
+            )
+            return
+
+        execution = self.heartbeat_turn(execution)
+        user_message = self._user_message(context, request)
+
+        if request.simulate_error:
+            terminal_message = self._assistant_message(
+                context,
+                "",
+                status="error",
+                error_code="SIMULATED_CHAT_FAILURE",
+                error_message=(
+                    "Controlled RC1 Premium Hardening failure."
+                ),
+            )
+            failed = self.repository.fail_execution(
+                execution,
+                user_message,
+                terminal_message,
+            )
+            yield TurnStreamSignal(
+                kind="terminal",
+                payload={"replayed": False},
+                response=self.response_from_execution(
+                    failed,
+                    latency_ms=int(
+                        (perf_counter() - started) * 1000
+                    ),
+                ),
+            )
+            return
+
+        contributions: list[AgentContribution] = []
+        owner_result: LLMResult | None = None
+        chunks: list[str] = []
+        chunk_index = 0
+
+        try:
+            for index, contributor_id in enumerate(
+                context.contributing_agents
+            ):
+                current = self.repository.get_execution(
+                    execution.tenant_id,
+                    execution.request_id,
+                )
+                if current is not None and current.status == "cancelled":
+                    yield TurnStreamSignal(
+                        kind="terminal",
+                        payload={"replayed": False},
+                        response=self.response_from_execution(
+                            current,
+                            latency_ms=int(
+                                (perf_counter() - started) * 1000
+                            ),
+                        ),
+                    )
+                    return
+
+                node_id = (
+                    f"{context.execution_id}:contributor:{index}"
+                )
+                yield TurnStreamSignal(
+                    kind="execution",
+                    payload={
+                        "phase": "node_started",
+                        "node_id": node_id,
+                        "agent_id": contributor_id,
+                        "role": "contributor",
+                        "trace_kind": context.trace_kind,
+                    },
+                )
+                result = self.llm_provider.complete(
+                    self._contribution_request(
+                        context,
+                        request,
+                        contributor_id,
+                    )
+                )
+                contribution = self._contribution_from_result(
+                    contributor_id,
+                    result,
+                )
+                contributions.append(contribution)
+                yield TurnStreamSignal(
+                    kind="execution",
+                    payload={
+                        "phase": "node_completed",
+                        "node_id": node_id,
+                        "agent_id": contributor_id,
+                        "role": "contributor",
+                        "trace_kind": context.trace_kind,
+                        "content": contribution.content,
+                        "token_usage": contribution.token_usage(),
+                    },
+                )
+
+            owner_request = self._owner_request(
+                context,
+                request,
+                tuple(contributions),
+            )
+            provider_stream = self._provider_stream(owner_request)
+            try:
+                for event in provider_stream:
+                    current = self.repository.get_execution(
+                        execution.tenant_id,
+                        execution.request_id,
+                    )
+                    if (
+                        current is not None
+                        and current.status == "cancelled"
+                    ):
+                        close = getattr(
+                            provider_stream,
+                            "close",
+                            None,
+                        )
+                        if callable(close):
+                            close()
+                        yield TurnStreamSignal(
+                            kind="terminal",
+                            payload={"replayed": False},
+                            response=self.response_from_execution(
+                                current,
+                                latency_ms=int(
+                                    (perf_counter() - started) * 1000
+                                ),
+                            ),
+                        )
+                        return
+
+                    if event.event_type == "delta":
+                        if not event.delta:
+                            continue
+                        chunks.append(event.delta)
+                        yield TurnStreamSignal(
+                            kind="delta",
+                            payload={
+                                "content": event.delta,
+                                "chunk_index": chunk_index,
+                                "replayed": False,
+                            },
+                        )
+                        chunk_index += 1
+                    elif event.event_type == "completed":
+                        owner_result = event.result
+            finally:
+                close = getattr(provider_stream, "close", None)
+                if callable(close):
+                    close()
+
+            content = "".join(chunks).strip()
+            if owner_result is None:
+                if not content:
+                    raise LLMProviderError(
+                        "LLM_PROVIDER_EMPTY_RESPONSE",
+                        "The language model provider returned no text.",
+                        retryable=False,
+                    )
+                owner_result = LLMResult(
+                    content=content,
+                    provider=self.llm_provider.provider_name,
+                    model=self.llm_provider.model_name,
+                )
+            elif not chunks and owner_result.content:
+                content = owner_result.content
+                yield TurnStreamSignal(
+                    kind="delta",
+                    payload={
+                        "content": content,
+                        "chunk_index": 0,
+                        "replayed": False,
+                    },
+                )
+            else:
+                content = owner_result.content or content
+
+        except LLMProviderError as exc:
+            terminal_message = self._assistant_message(
+                context,
+                "",
+                status="error",
+                error_code=exc.code,
+                error_message=exc.safe_message,
+            )
+            failed = self.repository.fail_execution(
+                execution,
+                user_message,
+                terminal_message,
+            )
+            log_execution_event(
+                "execution_terminal_error",
+                failed,
+                error_code=failed.error_code,
+                provider=self.llm_provider.provider_name,
+                retryable=exc.retryable,
+            )
+            yield TurnStreamSignal(
+                kind="terminal",
+                payload={"replayed": False},
+                response=self.response_from_execution(
+                    failed,
+                    latency_ms=int(
+                        (perf_counter() - started) * 1000
+                    ),
+                ),
+            )
+            return
+        except Exception:
+            terminal_message = self._assistant_message(
+                context,
+                "",
+                status="error",
+                error_code="PROVIDER_EXECUTION_FAILED",
+                error_message="The provider execution failed.",
+            )
+            failed = self.repository.fail_execution(
+                execution,
+                user_message,
+                terminal_message,
+            )
+            log_execution_event(
+                "execution_terminal_error",
+                failed,
+                error_code=failed.error_code,
+                provider=self.llm_provider.provider_name,
+            )
+            yield TurnStreamSignal(
+                kind="terminal",
+                payload={"replayed": False},
+                response=self.response_from_execution(
+                    failed,
+                    latency_ms=int(
+                        (perf_counter() - started) * 1000
+                    ),
+                ),
+            )
+            return
+
+        execution = self.heartbeat_turn(execution)
+        current = self.repository.get_execution(
+            execution.tenant_id,
+            execution.request_id,
+        )
+        if current is not None and current.status == "cancelled":
+            yield TurnStreamSignal(
+                kind="terminal",
+                payload={"replayed": False},
+                response=self.response_from_execution(
+                    current,
+                    latency_ms=int(
+                        (perf_counter() - started) * 1000
+                    ),
+                ),
+            )
+            return
+
+        assistant_message = self._assistant_message(
+            context,
+            content,
+            status="success",
+        )
+        try:
+            completed = self.repository.complete_execution(
+                execution,
+                user_message,
+                assistant_message,
+            )
+        except Exception as exc:
+            current = self.repository.get_execution(
+                execution.tenant_id,
+                execution.request_id,
+            )
+            if current is not None and current.status == "cancelled":
+                yield TurnStreamSignal(
+                    kind="terminal",
+                    payload={"replayed": False},
+                    response=self.response_from_execution(
+                        current,
+                        latency_ms=int(
+                            (perf_counter() - started) * 1000
+                        ),
+                    ),
+                )
+                return
+            try:
+                self.repository.abort_execution(
+                    execution.tenant_id,
+                    execution.request_id,
+                    error_code="TURN_PERSISTENCE_FAILED",
+                    error_message=(
+                        "The turn could not be persisted atomically."
+                    ),
+                )
+            except Exception:
+                pass
+            raise ServiceUnavailableError(
+                "TURN_PERSISTENCE_FAILED",
+                "The turn could not be persisted atomically.",
+            ) from exc
+
+        contribution_tuple = tuple(contributions)
+        token_usage = self._aggregate_token_usage(
+            contribution_tuple,
+            owner_result,
+        )
+        execution_trace = self._execution_trace(
+            context,
+            contribution_tuple,
+            owner_result,
+        )
+        log_execution_event(
+            "execution_terminal_success",
+            completed,
+            provider=(
+                owner_result.provider
+                if owner_result is not None
+                else self.llm_provider.provider_name
+            ),
+            model=(
+                owner_result.model
+                if owner_result is not None
+                else self.llm_provider.model_name
+            ),
+            token_usage=token_usage,
+            contributor_agents=[
+                item.agent_id for item in contribution_tuple
+            ],
+        )
+        response = self.response_from_execution(
+            completed,
+            latency_ms=int((perf_counter() - started) * 1000),
+        )
+        updates: dict[str, object] = {
+            "execution_trace": execution_trace,
+        }
+        if token_usage is not None:
+            updates["token_usage"] = token_usage
+        response = response.model_copy(update=updates)
+        yield TurnStreamSignal(
+            kind="terminal",
+            payload={"replayed": False},
+            response=response,
         )
 
     def cancel_execution(

@@ -191,13 +191,41 @@ def stream_chat(
             },
         )
 
-        response, replayed = service.execute_reserved_turn(
-            context,
-            execution,
-            effective_request,
-            created=created,
-            started=started,
-        )
+        if service.realtime_streaming_enabled:
+            terminal_response = None
+            terminal_replayed = False
+            for signal in service.stream_reserved_turn(
+                context,
+                execution,
+                effective_request,
+                created=created,
+                started=started,
+            ):
+                if signal.kind == "execution":
+                    yield emit("execution", signal.payload)
+                    continue
+                if signal.kind == "delta":
+                    yield emit("agent_chunk", signal.payload)
+                    continue
+                if signal.kind == "terminal":
+                    terminal_response = signal.response
+                    terminal_replayed = bool(
+                        signal.payload.get("replayed", False)
+                    )
+
+            if terminal_response is None:
+                raise RuntimeError("STREAM_TERMINAL_RESPONSE_REQUIRED")
+
+            response = terminal_response
+            replayed = terminal_replayed
+        else:
+            response, replayed = service.execute_reserved_turn(
+                context,
+                execution,
+                effective_request,
+                created=created,
+                started=started,
+            )
 
         if response.status == "cancelled":
             yield emit(
@@ -240,14 +268,15 @@ def stream_chat(
             )
             return
 
-        yield emit(
-            "agent_chunk",
-            {
-                "content": response.content,
-                "chunk_index": 0,
-                "replayed": replayed,
-            },
-        )
+        if not service.realtime_streaming_enabled:
+            yield emit(
+                "agent_chunk",
+                {
+                    "content": response.content,
+                    "chunk_index": 0,
+                    "replayed": replayed,
+                },
+            )
         yield emit(
             "agent_done",
             {

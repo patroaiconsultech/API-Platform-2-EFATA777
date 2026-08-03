@@ -115,6 +115,8 @@ class AgentTurnContext(BaseModel):
     turn_owner: str
     display_agent: str
     route_family: str
+    contributing_agents: tuple[str, ...] = ()
+    trace_kind: Literal["trace_lite"] = "trace_lite"
     ownership_locked: bool = True
     governance_mode: str = "controlled_execution"
     write_allowed: bool = True
@@ -144,6 +146,7 @@ class ResponseEnvelope(BaseModel):
     status: Literal["success", "error", "cancelled"]
     error: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
+    execution_trace: list[dict[str, Any]] | None = None
     latency_ms: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -183,6 +186,32 @@ class CancelExecutionRequest(BaseModel):
 class RecoveryDecisionCreate(BaseModel):
     decision: RecoveryDecision
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class EvolutionProposalRequest(BaseModel):
+    objective: str = Field(min_length=1, max_length=20_000)
+    evidence: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    requested_agent: Literal["Orion", "Team"] = "Orion"
+
+
+class EvolutionProposalEnvelope(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    proposal_id: str
+    tenant_id: str
+    requested_by: str
+    status: Literal["proposal_only"] = "proposal_only"
+    content: str
+    provider: str
+    model: str
+    token_usage: dict[str, int] | None = None
+    write_executed: bool = False
+    commit_executed: bool = False
+    merge_executed: bool = False
+    deploy_executed: bool = False
+    migration_executed: bool = False
+    human_approval_required: bool = True
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class SSEEvent(BaseModel):

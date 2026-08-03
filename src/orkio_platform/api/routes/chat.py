@@ -11,6 +11,7 @@ from orkio_platform.domain.models import (
     ResponseEnvelope,
 )
 from orkio_platform.infrastructure.repositories import repository
+from orkio_platform.llm.factory import build_llm_provider
 from orkio_platform.realtime.sse import stream_chat
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -21,6 +22,17 @@ service = PlatformService(
     execution_stale_after_seconds=(
         settings.execution_stale_after_seconds
     ),
+    llm_provider=build_llm_provider(settings),
+    llm_history_messages=settings.llm_history_messages,
+    llm_max_context_chars=settings.llm_max_context_chars,
+    realtime_streaming_enabled=(
+        settings.realtime_streaming_enabled
+    ),
+    multiagent_enabled=settings.multiagent_enabled,
+    multiagent_max_contributors=(
+        settings.multiagent_max_contributors
+    ),
+    multiagent_team_agents=settings.multiagent_team_agents,
 )
 
 

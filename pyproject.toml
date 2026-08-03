@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orkio-platform-backend-rc1"
-version = "0.4.2"
+version = "0.6.0"
 description = "ORKIO Plataforma 2.0 controlled RC1 test implementation"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,7 +13,8 @@ dependencies = [
   "uvicorn>=0.30,<1",
   "sqlalchemy>=2.0,<3",
   "alembic>=1.13,<2",
-  "psycopg[binary]>=3.1,<4"
+  "psycopg[binary]>=3.1,<4",
+  "openai==2.46.0"
 ]
 
 [project.optional-dependencies]

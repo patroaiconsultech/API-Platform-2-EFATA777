@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from orkio_platform.version import RELEASE_VERSION
 
@@ -13,6 +13,11 @@ AuthMode = Literal[
     "demo_headers",
     "oidc_introspection",
     "external_required",
+]
+
+LLMProviderMode = Literal[
+    "deterministic",
+    "openai_responses",
 ]
 
 
@@ -144,6 +149,25 @@ class Settings(BaseModel):
     execution_lease_seconds: int
     execution_stale_after_seconds: int
 
+    llm_provider: LLMProviderMode
+    llm_history_messages: int
+    llm_max_context_chars: int
+    openai_api_key: SecretStr | None
+    openai_default_model: str | None
+    openai_base_url: str
+    openai_organization_id: str | None
+    openai_project_id: str | None
+    openai_timeout_seconds: int
+    openai_max_retries: int
+    openai_max_output_tokens: int
+    openai_store_responses: bool
+
+    realtime_streaming_enabled: bool
+    multiagent_enabled: bool
+    multiagent_max_contributors: int
+    multiagent_team_agents: tuple[str, ...]
+    assisted_evolution_enabled: bool
+
     @property
     def oidc_configured(self) -> bool:
         required = (
@@ -270,6 +294,40 @@ def get_settings() -> Settings:
             "PLATFORM_ALLOWED_ORIGINS_WILDCARD_FORBIDDEN"
         )
 
+    requested_llm_provider = os.getenv(
+        "PLATFORM_LLM_PROVIDER",
+        "deterministic",
+    ).strip().lower()
+    allowed_llm_providers = {
+        "deterministic",
+        "openai_responses",
+    }
+    if requested_llm_provider not in allowed_llm_providers:
+        raise ValueError("PLATFORM_LLM_PROVIDER_INVALID")
+    llm_provider: LLMProviderMode = requested_llm_provider  # type: ignore[assignment]
+
+    openai_api_key = _optional_env("OPENAI_API_KEY")
+    openai_default_model = _optional_env(
+        "OPENAI_DEFAULT_MODEL"
+    )
+    openai_base_url = os.getenv(
+        "OPENAI_BASE_URL",
+        "https://api.openai.com/v1",
+    ).strip().rstrip("/")
+    if not openai_base_url:
+        raise ValueError("OPENAI_BASE_URL_INVALID")
+    _require_https(
+        "OPENAI_BASE_URL",
+        openai_base_url,
+        production=production,
+    )
+
+    if llm_provider == "openai_responses":
+        if openai_api_key is None:
+            raise ValueError("OPENAI_API_KEY_REQUIRED")
+        if openai_default_model is None:
+            raise ValueError("OPENAI_DEFAULT_MODEL_REQUIRED")
+
     settings = Settings(
         app_name=os.getenv(
             "PLATFORM_API_TITLE",
@@ -367,6 +425,72 @@ def get_settings() -> Settings:
         ),
         execution_lease_seconds=lease_seconds,
         execution_stale_after_seconds=stale_seconds,
+        llm_provider=llm_provider,
+        llm_history_messages=_env_int(
+            "PLATFORM_LLM_HISTORY_MESSAGES",
+            20,
+            minimum=0,
+            maximum=100,
+        ),
+        llm_max_context_chars=_env_int(
+            "PLATFORM_LLM_MAX_CONTEXT_CHARS",
+            100_000,
+            minimum=1_000,
+            maximum=1_000_000,
+        ),
+        openai_api_key=openai_api_key,
+        openai_default_model=openai_default_model,
+        openai_base_url=openai_base_url,
+        openai_organization_id=_optional_env(
+            "OPENAI_ORGANIZATION_ID"
+        ),
+        openai_project_id=_optional_env(
+            "OPENAI_PROJECT_ID"
+        ),
+        openai_timeout_seconds=_env_int(
+            "OPENAI_TIMEOUT_SECONDS",
+            120,
+            minimum=1,
+            maximum=600,
+        ),
+        openai_max_retries=_env_int(
+            "OPENAI_MAX_RETRIES",
+            2,
+            minimum=0,
+            maximum=5,
+        ),
+        openai_max_output_tokens=_env_int(
+            "OPENAI_MAX_OUTPUT_TOKENS",
+            4096,
+            minimum=1,
+            maximum=100_000,
+        ),
+        openai_store_responses=_env_bool(
+            "OPENAI_STORE_RESPONSES",
+            False,
+        ),
+        realtime_streaming_enabled=_env_bool(
+            "PLATFORM_REALTIME_STREAMING_ENABLED",
+            False,
+        ),
+        multiagent_enabled=_env_bool(
+            "PLATFORM_MULTIAGENT_ENABLED",
+            False,
+        ),
+        multiagent_max_contributors=_env_int(
+            "PLATFORM_MULTIAGENT_MAX_CONTRIBUTORS",
+            2,
+            minimum=0,
+            maximum=3,
+        ),
+        multiagent_team_agents=_env_csv(
+            "PLATFORM_MULTIAGENT_TEAM_AGENTS",
+            ("Orion", "Chris", "Laura"),
+        ),
+        assisted_evolution_enabled=_env_bool(
+            "PLATFORM_ASSISTED_EVOLUTION_ENABLED",
+            False,
+        ),
     )
 
     if (
@@ -382,4 +506,10 @@ def get_settings() -> Settings:
         raise ValueError("PLATFORM_OIDC_ROLES_CLAIM_INVALID")
     if not settings.oidc_member_roles:
         raise ValueError("PLATFORM_OIDC_MEMBER_ROLES_REQUIRED")
+    allowed_team_agents = {"Orion", "Chris", "Laura"}
+    if any(
+        agent_id not in allowed_team_agents
+        for agent_id in settings.multiagent_team_agents
+    ):
+        raise ValueError("PLATFORM_MULTIAGENT_TEAM_AGENTS_INVALID")
     return settings
