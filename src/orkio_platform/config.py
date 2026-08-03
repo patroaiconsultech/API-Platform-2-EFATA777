@@ -166,6 +166,14 @@ class Settings(BaseModel):
     multiagent_enabled: bool
     multiagent_max_contributors: int
     multiagent_team_agents: tuple[str, ...]
+    multiagent_contribution_max_chars: int
+    multiagent_contribution_max_output_tokens: int
+    multiagent_owner_max_output_tokens: int
+    multiagent_contribution_latency_budget_ms: int
+    multiagent_turn_latency_budget_ms: int
+    multiagent_history_messages: int
+    multiagent_max_context_chars: int
+    multiagent_turn_max_total_tokens: int
     assisted_evolution_enabled: bool
 
     @property
@@ -486,6 +494,54 @@ def get_settings() -> Settings:
         multiagent_team_agents=_env_csv(
             "PLATFORM_MULTIAGENT_TEAM_AGENTS",
             ("Orion", "Chris", "Laura"),
+        ),
+        multiagent_contribution_max_chars=_env_int(
+            "PLATFORM_MULTIAGENT_CONTRIBUTION_MAX_CHARS",
+            4_000,
+            minimum=500,
+            maximum=20_000,
+        ),
+        multiagent_contribution_max_output_tokens=_env_int(
+            "PLATFORM_MULTIAGENT_CONTRIBUTION_MAX_OUTPUT_TOKENS",
+            900,
+            minimum=64,
+            maximum=8_192,
+        ),
+        multiagent_owner_max_output_tokens=_env_int(
+            "PLATFORM_MULTIAGENT_OWNER_MAX_OUTPUT_TOKENS",
+            1_200,
+            minimum=64,
+            maximum=8_192,
+        ),
+        multiagent_contribution_latency_budget_ms=_env_int(
+            "PLATFORM_MULTIAGENT_CONTRIBUTION_LATENCY_BUDGET_MS",
+            15_000,
+            minimum=100,
+            maximum=300_000,
+        ),
+        multiagent_turn_latency_budget_ms=_env_int(
+            "PLATFORM_MULTIAGENT_TURN_LATENCY_BUDGET_MS",
+            25_000,
+            minimum=100,
+            maximum=600_000,
+        ),
+        multiagent_history_messages=_env_int(
+            "PLATFORM_MULTIAGENT_HISTORY_MESSAGES",
+            4,
+            minimum=0,
+            maximum=20,
+        ),
+        multiagent_max_context_chars=_env_int(
+            "PLATFORM_MULTIAGENT_MAX_CONTEXT_CHARS",
+            20_000,
+            minimum=1_000,
+            maximum=200_000,
+        ),
+        multiagent_turn_max_total_tokens=_env_int(
+            "PLATFORM_MULTIAGENT_TURN_MAX_TOTAL_TOKENS",
+            7_000,
+            minimum=256,
+            maximum=100_000,
         ),
         assisted_evolution_enabled=_env_bool(
             "PLATFORM_ASSISTED_EVOLUTION_ENABLED",

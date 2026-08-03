@@ -151,6 +151,11 @@ class ResponseEnvelope(BaseModel):
     token_usage: dict[str, int] | None = None
     execution_trace: list[dict[str, Any]] | None = None
     contributions: list[dict[str, Any]] | None = None
+    owner_contract: dict[str, Any] | None = None
+    budget: dict[str, Any] | None = None
+    knowledge_snapshot_version: str | None = None
+    transport: Literal["http_json", "sse"] = "http_json"
+    terminal_source: Literal["envelope", "wire"] = "envelope"
     latency_ms: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 

@@ -8,6 +8,9 @@ from time import perf_counter
 
 from orkio_platform.application.catalog import resolve_agent
 from orkio_platform.application.streaming import TurnStreamSignal
+from orkio_platform.knowledge.snapshot import (
+    KNOWLEDGE_SNAPSHOT_VERSION,
+)
 from orkio_platform.llm.contracts import (
     LLMCompletionRequest,
     LLMMessage,
@@ -21,7 +24,9 @@ from orkio_platform.llm.deterministic import (
 )
 from orkio_platform.llm.prompts import (
     contribution_prompt_for_agent,
+    contribution_retry_prompt_for_agent,
     roundtable_owner_prompt,
+    roundtable_owner_retry_prompt,
     synthesis_prompt_for_agent,
     system_prompt_for_agent,
 )
@@ -50,7 +55,9 @@ from orkio_platform.observability.execution import log_execution_event
 from orkio_platform.orchestration.contracts import AgentContribution
 from orkio_platform.orchestration.router import build_orchestration_plan
 from orkio_platform.orchestration.output_normalization import (
-    normalize_agent_viewpoint,
+    AgentOutputAssessment,
+    assess_agent_output,
+    assess_owner_output,
 )
 
 
@@ -72,6 +79,15 @@ class PlatformService:
             "Chris",
             "Laura",
         ),
+        multiagent_contribution_max_chars: int = 4_000,
+        multiagent_contribution_max_output_tokens: int = 900,
+        multiagent_owner_max_output_tokens: int = 1_200,
+        multiagent_contribution_latency_budget_ms: int = 15_000,
+        multiagent_turn_latency_budget_ms: int = 25_000,
+        multiagent_history_messages: int = 4,
+        multiagent_max_context_chars: int = 20_000,
+        multiagent_turn_max_total_tokens: int = 7_000,
+        knowledge_snapshot_version: str = KNOWLEDGE_SNAPSHOT_VERSION,
     ) -> None:
         if execution_lease_seconds <= 0:
             raise ValueError("EXECUTION_LEASE_THRESHOLD_INVALID")
@@ -97,6 +113,51 @@ class PlatformService:
         self.multiagent_enabled = multiagent_enabled
         self.multiagent_max_contributors = multiagent_max_contributors
         self.multiagent_team_agents = multiagent_team_agents
+        if multiagent_contribution_max_chars < 500:
+            raise ValueError("MULTIAGENT_CONTRIBUTION_MAX_CHARS_INVALID")
+        if multiagent_contribution_max_output_tokens < 64:
+            raise ValueError(
+                "MULTIAGENT_CONTRIBUTION_OUTPUT_BUDGET_INVALID"
+            )
+        if multiagent_owner_max_output_tokens < 64:
+            raise ValueError("MULTIAGENT_OWNER_OUTPUT_BUDGET_INVALID")
+        if multiagent_contribution_latency_budget_ms < 100:
+            raise ValueError(
+                "MULTIAGENT_CONTRIBUTION_LATENCY_BUDGET_INVALID"
+            )
+        if multiagent_turn_latency_budget_ms < 100:
+            raise ValueError("MULTIAGENT_TURN_LATENCY_BUDGET_INVALID")
+        if multiagent_history_messages < 0:
+            raise ValueError("MULTIAGENT_HISTORY_MESSAGES_INVALID")
+        if multiagent_max_context_chars < 1_000:
+            raise ValueError("MULTIAGENT_MAX_CONTEXT_CHARS_INVALID")
+        if multiagent_turn_max_total_tokens < 256:
+            raise ValueError("MULTIAGENT_TURN_TOKEN_BUDGET_INVALID")
+        if not knowledge_snapshot_version.strip():
+            raise ValueError("KNOWLEDGE_SNAPSHOT_VERSION_REQUIRED")
+        self.multiagent_contribution_max_chars = (
+            multiagent_contribution_max_chars
+        )
+        self.multiagent_contribution_max_output_tokens = (
+            multiagent_contribution_max_output_tokens
+        )
+        self.multiagent_owner_max_output_tokens = (
+            multiagent_owner_max_output_tokens
+        )
+        self.multiagent_contribution_latency_budget_ms = (
+            multiagent_contribution_latency_budget_ms
+        )
+        self.multiagent_turn_latency_budget_ms = (
+            multiagent_turn_latency_budget_ms
+        )
+        self.multiagent_history_messages = multiagent_history_messages
+        self.multiagent_max_context_chars = multiagent_max_context_chars
+        self.multiagent_turn_max_total_tokens = (
+            multiagent_turn_max_total_tokens
+        )
+        self.knowledge_snapshot_version = (
+            knowledge_snapshot_version.strip()
+        )
 
     def create_thread(
         self,
@@ -343,6 +404,9 @@ class PlatformService:
         self,
         context: AgentTurnContext,
         request: ChatRequest,
+        *,
+        history_messages_limit: int | None = None,
+        max_context_chars: int | None = None,
     ) -> tuple[LLMMessage, ...]:
         persisted = self.repository.list_messages(
             context.tenant_id,
@@ -358,10 +422,20 @@ class PlatformService:
             and message.content.strip()
             and message.status not in {"error", "cancelled"}
         ]
-        if self.llm_history_messages == 0:
+        history_limit = (
+            self.llm_history_messages
+            if history_messages_limit is None
+            else history_messages_limit
+        )
+        if history_limit == 0:
             eligible = []
         else:
-            eligible = eligible[-self.llm_history_messages :]
+            eligible = eligible[-history_limit:]
+        context_char_limit = (
+            self.llm_max_context_chars
+            if max_context_chars is None
+            else max_context_chars
+        )
 
         current = LLMMessage(
             role="user",
@@ -372,7 +446,7 @@ class PlatformService:
 
         for message in reversed(eligible):
             message_chars = len(message.content)
-            if used_chars + message_chars > self.llm_max_context_chars:
+            if used_chars + message_chars > context_char_limit:
                 break
             selected.append(message)
             used_chars += message_chars
@@ -387,8 +461,27 @@ class PlatformService:
         *,
         agent_id: str,
         system_prompt: str,
+        current_only: bool = False,
+        max_output_tokens: int | None = None,
+        history_messages_limit: int | None = None,
+        max_context_chars: int | None = None,
     ) -> LLMCompletionRequest:
         agent = resolve_agent(agent_id)
+        messages = (
+            (
+                LLMMessage(
+                    role="user",
+                    content=request.content,
+                ),
+            )
+            if current_only
+            else self._history_messages(
+                context,
+                request,
+                history_messages_limit=history_messages_limit,
+                max_context_chars=max_context_chars,
+            )
+        )
         return LLMCompletionRequest(
             tenant_id=context.tenant_id,
             user_id=context.user_id,
@@ -396,7 +489,8 @@ class PlatformService:
             agent_id=agent.agent_id,
             display_name=agent.display_name,
             system_prompt=system_prompt,
-            messages=self._history_messages(context, request),
+            messages=messages,
+            max_output_tokens=max_output_tokens,
         )
 
     def _contribution_request(
@@ -404,13 +498,29 @@ class PlatformService:
         context: AgentTurnContext,
         request: ChatRequest,
         contributor_id: str,
+        *,
+        retry_reason: str | None = None,
     ) -> LLMCompletionRequest:
         contributor = resolve_agent(contributor_id)
+        system_prompt = (
+            contribution_retry_prompt_for_agent(
+                contributor,
+                retry_reason,
+            )
+            if retry_reason
+            else contribution_prompt_for_agent(contributor)
+        )
         return self._llm_request_for_agent(
             context,
             request,
             agent_id=contributor.agent_id,
-            system_prompt=contribution_prompt_for_agent(contributor),
+            system_prompt=system_prompt,
+            current_only=retry_reason is not None,
+            max_output_tokens=(
+                self.multiagent_contribution_max_output_tokens
+            ),
+            history_messages_limit=self.multiagent_history_messages,
+            max_context_chars=self.multiagent_max_context_chars,
         )
 
     def _owner_request(
@@ -418,39 +528,205 @@ class PlatformService:
         context: AgentTurnContext,
         request: ChatRequest,
         contributions: tuple[AgentContribution, ...],
+        *,
+        retry_reason: str | None = None,
     ) -> LLMCompletionRequest:
         owner = resolve_agent(context.turn_owner)
-        system_prompt = (
-            roundtable_owner_prompt(owner, contributions)
-            if context.interaction_mode == "roundtable"
-            else synthesis_prompt_for_agent(owner, contributions)
-        )
+        if context.interaction_mode == "roundtable":
+            system_prompt = (
+                roundtable_owner_retry_prompt(
+                    owner,
+                    contributions,
+                    retry_reason,
+                )
+                if retry_reason
+                else roundtable_owner_prompt(owner, contributions)
+            )
+        else:
+            system_prompt = synthesis_prompt_for_agent(
+                owner,
+                contributions,
+            )
+        multiagent_request = context.interaction_mode != "single"
         return self._llm_request_for_agent(
             context,
             request,
             agent_id=owner.agent_id,
             system_prompt=system_prompt,
+            current_only=retry_reason is not None,
+            max_output_tokens=(
+                self.multiagent_owner_max_output_tokens
+                if multiagent_request
+                else None
+            ),
+            history_messages_limit=(
+                self.multiagent_history_messages
+                if multiagent_request
+                else None
+            ),
+            max_context_chars=(
+                self.multiagent_max_context_chars
+                if multiagent_request
+                else None
+            ),
         )
 
     @staticmethod
-    def _contribution_from_result(
+    def _summed_result_tokens(
+        results: list[LLMResult],
+        attribute: str,
+    ) -> int | None:
+        values = [
+            getattr(result, attribute)
+            for result in results
+            if getattr(result, attribute) is not None
+        ]
+        return sum(values) if values else None
+
+    def _contribution_from_attempts(
+        self,
         agent_id: str,
-        result: LLMResult,
+        results: list[LLMResult],
+        assessment: AgentOutputAssessment,
+        *,
+        retry_count: int,
+        latency_ms: int,
+    ) -> AgentContribution:
+        agent = resolve_agent(agent_id)
+        final = results[-1]
+        output_tokens = self._summed_result_tokens(
+            results,
+            "output_tokens",
+        )
+        budget_exceeded = (
+            latency_ms
+            > self.multiagent_contribution_latency_budget_ms
+            or any(
+                result.output_tokens is not None
+                and result.output_tokens
+                > self.multiagent_contribution_max_output_tokens
+                for result in results
+            )
+        )
+        return AgentContribution(
+            agent_id=agent.agent_id,
+            display_name=agent.display_name,
+            content=assessment.content,
+            provider=final.provider,
+            model=final.model,
+            response_id=final.response_id,
+            input_tokens=self._summed_result_tokens(
+                results,
+                "input_tokens",
+            ),
+            output_tokens=output_tokens,
+            total_tokens=self._summed_result_tokens(
+                results,
+                "total_tokens",
+            ),
+            status=assessment.status,
+            status_reason=assessment.reason,
+            retry_count=retry_count,
+            latency_ms=latency_ms,
+            output_normalized=assessment.normalized,
+            budget_exceeded=budget_exceeded,
+        )
+
+    def _failed_contribution(
+        self,
+        agent_id: str,
+        *,
+        reason: str,
+        latency_ms: int,
+        retry_count: int = 0,
     ) -> AgentContribution:
         agent = resolve_agent(agent_id)
         return AgentContribution(
             agent_id=agent.agent_id,
             display_name=agent.display_name,
-            content=normalize_agent_viewpoint(
-                result.content,
-                agent.agent_id,
+            content="",
+            provider=self.llm_provider.provider_name,
+            model=self.llm_provider.model_name,
+            status="failed",
+            status_reason=reason,
+            retry_count=retry_count,
+            latency_ms=latency_ms,
+            budget_exceeded=(
+                latency_ms
+                > self.multiagent_contribution_latency_budget_ms
             ),
-            provider=result.provider,
-            model=result.model,
-            response_id=result.response_id,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            total_tokens=result.total_tokens,
+        )
+
+    def _complete_contribution(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+        contributor_id: str,
+    ) -> AgentContribution:
+        started = perf_counter()
+        results: list[LLMResult] = []
+        retry_count = 0
+        try:
+            first = self.llm_provider.complete(
+                self._contribution_request(
+                    context,
+                    request,
+                    contributor_id,
+                )
+            )
+            results.append(first)
+            assessment = assess_agent_output(
+                first.content,
+                contributor_id,
+                max_chars=self.multiagent_contribution_max_chars,
+            )
+
+            if assessment.retryable_contract_failure:
+                retry_count = 1
+                second = self.llm_provider.complete(
+                    self._contribution_request(
+                        context,
+                        request,
+                        contributor_id,
+                        retry_reason=(
+                            assessment.reason
+                            or assessment.status
+                        ),
+                    )
+                )
+                results.append(second)
+                assessment = assess_agent_output(
+                    second.content,
+                    contributor_id,
+                    max_chars=(
+                        self.multiagent_contribution_max_chars
+                    ),
+                )
+        except LLMProviderError as exc:
+            return self._failed_contribution(
+                contributor_id,
+                reason=exc.code,
+                retry_count=retry_count,
+                latency_ms=int(
+                    (perf_counter() - started) * 1000
+                ),
+            )
+        except Exception:
+            return self._failed_contribution(
+                contributor_id,
+                reason="PROVIDER_EXECUTION_FAILED",
+                retry_count=retry_count,
+                latency_ms=int(
+                    (perf_counter() - started) * 1000
+                ),
+            )
+
+        return self._contribution_from_attempts(
+            contributor_id,
+            results,
+            assessment,
+            retry_count=retry_count,
+            latency_ms=int((perf_counter() - started) * 1000),
         )
 
     def generate_contributions(
@@ -458,62 +734,163 @@ class PlatformService:
         context: AgentTurnContext,
         request: ChatRequest,
     ) -> tuple[AgentContribution, ...]:
-        contributions: list[AgentContribution] = []
-        for contributor_id in context.contributing_agents:
-            result = self.llm_provider.complete(
-                self._contribution_request(
+        return tuple(
+            self._complete_contribution(
+                context,
+                request,
+                contributor_id,
+            )
+            for contributor_id in context.contributing_agents
+        )
+
+    def _owner_result_from_attempts(
+        self,
+        context: AgentTurnContext,
+        results: list[LLMResult],
+        assessment: AgentOutputAssessment | None,
+        *,
+        retry_count: int,
+        latency_ms: int,
+    ) -> tuple[LLMResult, dict[str, object]]:
+        final = results[-1]
+        if assessment is None:
+            content = final.content
+            status = "success"
+            reason = None
+            normalized = False
+        else:
+            content = assessment.content
+            status = assessment.status
+            reason = assessment.reason
+            normalized = assessment.normalized
+
+        result = LLMResult(
+            content=content,
+            provider=final.provider,
+            model=final.model,
+            response_id=final.response_id,
+            input_tokens=self._summed_result_tokens(
+                results,
+                "input_tokens",
+            ),
+            output_tokens=self._summed_result_tokens(
+                results,
+                "output_tokens",
+            ),
+            total_tokens=self._summed_result_tokens(
+                results,
+                "total_tokens",
+            ),
+        )
+        metadata: dict[str, object] = {
+            "status": status,
+            "reason": reason,
+            "retry_count": retry_count,
+            "latency_ms": latency_ms,
+            "output_normalized": normalized,
+            "contract_version": "owner_decision_v2",
+            "budget_exceeded": (
+                latency_ms > self.multiagent_turn_latency_budget_ms
+                or any(
+                    item.output_tokens is not None
+                    and item.output_tokens
+                    > self.multiagent_owner_max_output_tokens
+                    for item in results
+                )
+            ),
+        }
+        return result, metadata
+
+    def _complete_owner(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+        contributions: tuple[AgentContribution, ...],
+    ) -> tuple[LLMResult, dict[str, object]]:
+        started = perf_counter()
+        results: list[LLMResult] = [
+            self.llm_provider.complete(
+                self._owner_request(
                     context,
                     request,
-                    contributor_id,
+                    contributions,
                 )
             )
-            contributions.append(
-                self._contribution_from_result(
-                    contributor_id,
-                    result,
-                )
+        ]
+        assessment: AgentOutputAssessment | None = None
+        retry_count = 0
+
+        if context.interaction_mode == "roundtable":
+            assessment = assess_owner_output(
+                results[-1].content,
+                context.turn_owner,
+                max_chars=self.multiagent_contribution_max_chars,
             )
-        return tuple(contributions)
+            if assessment.retryable_contract_failure:
+                retry_count = 1
+                results.append(
+                    self.llm_provider.complete(
+                        self._owner_request(
+                            context,
+                            request,
+                            contributions,
+                            retry_reason=(
+                                assessment.reason
+                                or assessment.status
+                            ),
+                        )
+                    )
+                )
+                assessment = assess_owner_output(
+                    results[-1].content,
+                    context.turn_owner,
+                    max_chars=(
+                        self.multiagent_contribution_max_chars
+                    ),
+                )
+
+            if assessment.status != "success":
+                error_code = (
+                    "OWNER_REFUSED"
+                    if assessment.status == "refused"
+                    else "OWNER_CONTRACT_VIOLATION"
+                )
+                raise LLMProviderError(
+                    error_code,
+                    (
+                        "The coordinator output violated the "
+                        "speaker contract."
+                    ),
+                    retryable=False,
+                )
+
+        return self._owner_result_from_attempts(
+            context,
+            results,
+            assessment,
+            retry_count=retry_count,
+            latency_ms=int((perf_counter() - started) * 1000),
+        )
 
     def generate_content(
         self,
         context: AgentTurnContext,
         request: ChatRequest,
-    ) -> tuple[LLMResult, tuple[AgentContribution, ...]]:
+    ) -> tuple[
+        LLMResult,
+        tuple[AgentContribution, ...],
+        dict[str, object],
+    ]:
         contributions = self.generate_contributions(
             context,
             request,
         )
-        result = self.llm_provider.complete(
-            self._owner_request(
-                context,
-                request,
-                contributions,
-            )
+        result, owner_contract = self._complete_owner(
+            context,
+            request,
+            contributions,
         )
-        result = self._normalized_owner_result(context, result)
-        return result, contributions
-
-    @staticmethod
-    def _normalized_owner_result(
-        context: AgentTurnContext,
-        owner_result: LLMResult,
-    ) -> LLMResult:
-        if context.interaction_mode != "roundtable":
-            return owner_result
-        normalized = normalize_agent_viewpoint(
-            owner_result.content,
-            context.turn_owner,
-        )
-        return LLMResult(
-            content=normalized,
-            provider=owner_result.provider,
-            model=owner_result.model,
-            response_id=owner_result.response_id,
-            input_tokens=owner_result.input_tokens,
-            output_tokens=owner_result.output_tokens,
-            total_tokens=owner_result.total_tokens,
-        )
+        return result, contributions, owner_contract
 
     @staticmethod
     def _aggregate_token_usage(
@@ -552,12 +929,17 @@ class PlatformService:
                 "agent_id": item.agent_id,
                 "display_name": item.display_name,
                 "role": "contributor",
-                "status": "success",
+                "status": item.status,
+                "status_reason": item.status_reason,
                 "content": item.content,
                 "provider": item.provider,
                 "model": item.model,
                 "token_usage": item.token_usage(),
-                "output_normalized": True,
+                "retry_count": item.retry_count,
+                "latency_ms": item.latency_ms,
+                "output_normalized": item.output_normalized,
+                "budget_exceeded": item.budget_exceeded,
+                "contract_version": item.contract_version,
             }
             for item in contributions
         ]
@@ -574,6 +956,27 @@ class PlatformService:
         return "single"
 
     @staticmethod
+    def _public_contribution_content(
+        contribution: AgentContribution,
+    ) -> str:
+        if contribution.status == "success":
+            return contribution.content.strip()
+        if contribution.status == "refused":
+            return (
+                "Contribuição recusada pelo agente. "
+                "A execução não foi marcada como sucesso."
+            )
+        if contribution.status == "contract_violation":
+            return (
+                "Contribuição bloqueada pelo contrato de autoria "
+                f"({contribution.status_reason or 'violação não especificada'})."
+            )
+        return (
+            "Contribuição indisponível por falha controlada "
+            f"({contribution.status_reason or 'falha não especificada'})."
+        )
+
+    @staticmethod
     def _final_content(
         context: AgentTurnContext,
         contributions: tuple[AgentContribution, ...],
@@ -582,14 +985,12 @@ class PlatformService:
         if context.interaction_mode != "roundtable":
             return owner_result.content
 
-        owner_result = PlatformService._normalized_owner_result(
-            context,
-            owner_result,
-        )
         blocks = [
-            f"### {item.display_name}\n{item.content.strip()}"
+            (
+                f"### {item.display_name}\n"
+                f"{PlatformService._public_contribution_content(item)}"
+            )
             for item in contributions
-            if item.content.strip()
         ]
         owner_name = resolve_agent(context.turn_owner).display_name
         if owner_result.content.strip():
@@ -598,11 +999,12 @@ class PlatformService:
             )
         return "\n\n".join(blocks).strip()
 
-    @staticmethod
     def _execution_trace(
+        self,
         context: AgentTurnContext,
         contributions: tuple[AgentContribution, ...],
         owner_result: LLMResult | None,
+        owner_contract: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         trace: list[dict[str, object]] = []
         for index, item in enumerate(contributions):
@@ -613,12 +1015,17 @@ class PlatformService:
                     ),
                     "agent_id": item.agent_id,
                     "role": "contributor",
-                    "status": "success",
+                    "status": item.status,
+                    "status_reason": item.status_reason,
                     "trace_kind": context.trace_kind,
                     "provider": item.provider,
                     "model": item.model,
                     "token_usage": item.token_usage(),
-                    "output_normalized": True,
+                    "retry_count": item.retry_count,
+                    "latency_ms": item.latency_ms,
+                    "output_normalized": item.output_normalized,
+                    "budget_exceeded": item.budget_exceeded,
+                    "contract_version": item.contract_version,
                 }
             )
         trace.append(
@@ -627,9 +1034,18 @@ class PlatformService:
                 "agent_id": context.turn_owner,
                 "role": "owner",
                 "status": (
-                    "success"
-                    if owner_result is not None
-                    else "unknown"
+                    owner_contract.get("status", "success")
+                    if owner_contract is not None
+                    else (
+                        "success"
+                        if owner_result is not None
+                        else "unknown"
+                    )
+                ),
+                "status_reason": (
+                    owner_contract.get("reason")
+                    if owner_contract is not None
+                    else None
                 ),
                 "trace_kind": context.trace_kind,
                 "provider": (
@@ -647,12 +1063,77 @@ class PlatformService:
                     if owner_result is not None
                     else None
                 ),
+                "retry_count": (
+                    owner_contract.get("retry_count", 0)
+                    if owner_contract is not None
+                    else 0
+                ),
+                "latency_ms": (
+                    owner_contract.get("latency_ms")
+                    if owner_contract is not None
+                    else None
+                ),
                 "output_normalized": (
-                    context.interaction_mode == "roundtable"
+                    owner_contract.get("output_normalized", False)
+                    if owner_contract is not None
+                    else False
+                ),
+                "budget_exceeded": (
+                    owner_contract.get("budget_exceeded", False)
+                    if owner_contract is not None
+                    else False
+                ),
+                "contract_version": (
+                    owner_contract.get(
+                        "contract_version",
+                        "owner_decision_v2",
+                    )
+                    if owner_contract is not None
+                    else "owner_decision_v2"
                 ),
             }
         )
         return trace
+
+    def _budget_metadata(
+        self,
+        *,
+        latency_ms: int | None,
+        token_usage: dict[str, int] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "contribution_max_output_tokens": (
+                self.multiagent_contribution_max_output_tokens
+            ),
+            "owner_max_output_tokens": (
+                self.multiagent_owner_max_output_tokens
+            ),
+            "contribution_latency_budget_ms": (
+                self.multiagent_contribution_latency_budget_ms
+            ),
+            "turn_latency_budget_ms": (
+                self.multiagent_turn_latency_budget_ms
+            ),
+            "history_messages": self.multiagent_history_messages,
+            "max_context_chars": self.multiagent_max_context_chars,
+            "turn_max_total_tokens": (
+                self.multiagent_turn_max_total_tokens
+            ),
+            "observed_total_tokens": (
+                token_usage.get("total_tokens")
+                if token_usage is not None
+                else None
+            ),
+            "turn_token_budget_exceeded": (
+                token_usage is not None
+                and token_usage.get("total_tokens", 0)
+                > self.multiagent_turn_max_total_tokens
+            ),
+            "turn_latency_exceeded": (
+                latency_ms is not None
+                and latency_ms > self.multiagent_turn_latency_budget_ms
+            ),
+        }
 
     def _provider_stream(
         self,
@@ -715,6 +1196,10 @@ class PlatformService:
             content=content,
             status=execution.status,
             error=error,
+            budget=self._budget_metadata(latency_ms=latency_ms),
+            knowledge_snapshot_version=self.knowledge_snapshot_version,
+            transport="http_json",
+            terminal_source="envelope",
             latency_ms=latency_ms,
         )
 
@@ -773,8 +1258,13 @@ class PlatformService:
 
         provider_result: LLMResult | None = None
         contributions: tuple[AgentContribution, ...] = ()
+        owner_contract: dict[str, object] | None = None
         try:
-            provider_result, contributions = self.generate_content(
+            (
+                provider_result,
+                contributions,
+                owner_contract,
+            ) = self.generate_content(
                 context,
                 request,
             )
@@ -911,6 +1401,7 @@ class PlatformService:
             context,
             contributions,
             provider_result,
+            owner_contract,
         )
         log_execution_event(
             "execution_terminal_success",
@@ -941,6 +1432,14 @@ class PlatformService:
             "interaction_mode": context.interaction_mode,
             "contributions": self._contribution_payloads(
                 contributions
+            ),
+            "owner_contract": owner_contract,
+            "knowledge_snapshot_version": (
+                self.knowledge_snapshot_version
+            ),
+            "budget": self._budget_metadata(
+                latency_ms=response.latency_ms,
+                token_usage=token_usage,
             ),
         }
         if token_usage is not None:
@@ -1011,6 +1510,7 @@ class PlatformService:
 
         contributions: list[AgentContribution] = []
         owner_result: LLMResult | None = None
+        owner_contract: dict[str, object] | None = None
         chunks: list[str] = []
         chunk_index = 0
 
@@ -1052,16 +1552,10 @@ class PlatformService:
                         "interaction_mode": context.interaction_mode,
                     },
                 )
-                result = self.llm_provider.complete(
-                    self._contribution_request(
-                        context,
-                        request,
-                        contributor_id,
-                    )
-                )
-                contribution = self._contribution_from_result(
+                contribution = self._complete_contribution(
+                    context,
+                    request,
                     contributor_id,
-                    result,
                 )
                 contributions.append(contribution)
                 yield TurnStreamSignal(
@@ -1074,14 +1568,27 @@ class PlatformService:
                         "role": "contributor",
                         "trace_kind": context.trace_kind,
                         "interaction_mode": context.interaction_mode,
+                        "status": contribution.status,
+                        "status_reason": contribution.status_reason,
                         "content": contribution.content,
                         "provider": contribution.provider,
                         "model": contribution.model,
                         "token_usage": contribution.token_usage(),
-                        "output_normalized": True,
+                        "retry_count": contribution.retry_count,
+                        "latency_ms": contribution.latency_ms,
+                        "output_normalized": (
+                            contribution.output_normalized
+                        ),
+                        "budget_exceeded": (
+                            contribution.budget_exceeded
+                        ),
+                        "contract_version": (
+                            contribution.contract_version
+                        ),
                     },
                 )
 
+            owner_started = perf_counter()
             owner_request = self._owner_request(
                 context,
                 request,
@@ -1153,14 +1660,15 @@ class PlatformService:
                 )
             elif not chunks and owner_result.content:
                 streamed_owner_content = owner_result.content
-                yield TurnStreamSignal(
-                    kind="delta",
-                    payload={
-                        "content": streamed_owner_content,
-                        "chunk_index": 0,
-                        "replayed": False,
-                    },
-                )
+                if context.interaction_mode != "roundtable":
+                    yield TurnStreamSignal(
+                        kind="delta",
+                        payload={
+                            "content": streamed_owner_content,
+                            "chunk_index": 0,
+                            "replayed": False,
+                        },
+                    )
             elif not owner_result.content:
                 owner_result = LLMResult(
                     content=streamed_owner_content,
@@ -1172,23 +1680,93 @@ class PlatformService:
                     total_tokens=owner_result.total_tokens,
                 )
 
-            owner_result = self._normalized_owner_result(
-                context,
-                owner_result,
-            )
-            if (
-                context.interaction_mode == "roundtable"
-                and owner_result.content
-            ):
-                yield TurnStreamSignal(
-                    kind="delta",
-                    payload={
-                        "content": owner_result.content,
-                        "chunk_index": 0,
-                        "replayed": False,
-                        "normalized": True,
-                    },
+            if context.interaction_mode == "roundtable":
+                owner_results = [owner_result]
+                assessment = assess_owner_output(
+                    owner_result.content,
+                    context.turn_owner,
+                    max_chars=self.multiagent_contribution_max_chars,
                 )
+                owner_retry_count = 0
+                if assessment.retryable_contract_failure:
+                    owner_retry_count = 1
+                    retry_result = self.llm_provider.complete(
+                        self._owner_request(
+                            context,
+                            request,
+                            tuple(contributions),
+                            retry_reason=(
+                                assessment.reason
+                                or assessment.status
+                            ),
+                        )
+                    )
+                    owner_results.append(retry_result)
+                    assessment = assess_owner_output(
+                        retry_result.content,
+                        context.turn_owner,
+                        max_chars=(
+                            self.multiagent_contribution_max_chars
+                        ),
+                    )
+
+                if assessment.status != "success":
+                    error_code = (
+                        "OWNER_REFUSED"
+                        if assessment.status == "refused"
+                        else "OWNER_CONTRACT_VIOLATION"
+                    )
+                    raise LLMProviderError(
+                        error_code,
+                        (
+                            "The coordinator output violated the "
+                            "speaker contract."
+                        ),
+                        retryable=False,
+                    )
+
+                owner_result, owner_contract = (
+                    self._owner_result_from_attempts(
+                        context,
+                        owner_results,
+                        assessment,
+                        retry_count=owner_retry_count,
+                        latency_ms=int(
+                            (perf_counter() - owner_started) * 1000
+                        ),
+                    )
+                )
+                if owner_result.content:
+                    yield TurnStreamSignal(
+                        kind="delta",
+                        payload={
+                            "content": owner_result.content,
+                            "chunk_index": 0,
+                            "replayed": False,
+                            "normalized": (
+                                owner_contract.get(
+                                    "output_normalized",
+                                    False,
+                                )
+                            ),
+                            "owner_status": owner_contract.get(
+                                "status",
+                                "success",
+                            ),
+                        },
+                    )
+            else:
+                owner_contract = {
+                    "status": "success",
+                    "reason": None,
+                    "retry_count": 0,
+                    "latency_ms": int(
+                        (perf_counter() - owner_started) * 1000
+                    ),
+                    "output_normalized": False,
+                    "contract_version": "owner_decision_v2",
+                    "budget_exceeded": False,
+                }
 
             content = self._final_content(
                 context,
@@ -1329,6 +1907,7 @@ class PlatformService:
             context,
             contribution_tuple,
             owner_result,
+            owner_contract,
         )
         log_execution_event(
             "execution_terminal_success",
@@ -1348,7 +1927,7 @@ class PlatformService:
                 item.agent_id for item in contribution_tuple
             ],
             output_normalization=(
-                "speaker_scoped_v1"
+                "speaker_contract_v2"
                 if context.interaction_mode == "roundtable"
                 else "not_required"
             ),
@@ -1362,6 +1941,14 @@ class PlatformService:
             "interaction_mode": context.interaction_mode,
             "contributions": self._contribution_payloads(
                 contribution_tuple
+            ),
+            "owner_contract": owner_contract,
+            "knowledge_snapshot_version": (
+                self.knowledge_snapshot_version
+            ),
+            "budget": self._budget_metadata(
+                latency_ms=response.latency_ms,
+                token_usage=token_usage,
             ),
         }
         if token_usage is not None:

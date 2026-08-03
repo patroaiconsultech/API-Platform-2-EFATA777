@@ -107,12 +107,18 @@ class RecursiveRoundtableProvider:
     model_name = "fake-model"
 
     def complete(self, request: LLMCompletionRequest) -> LLMResult:
-        return LLMResult(
-            content=(
+        if "OWNER CONTRACT RETRY" in request.system_prompt:
+            content = "DECISION: Prioritize the smallest safe next step.\nPRIORITY: Speaker integrity.\nNEXT STEP: Re-run the roundtable.\nMAIN RISK: Recursive authorship.\nVERDICT: GO CONDITIONAL."
+        elif "CONTRACT RETRY" in request.system_prompt:
+            content = f"Own viewpoint from {request.agent_id}"
+        else:
+            content = (
                 f"### {request.agent_id}\n"
                 f"Own viewpoint from {request.agent_id}\n\n"
                 "### Orkio\nImpersonated coordinator"
-            ),
+            )
+        return LLMResult(
+            content=content,
             provider=self.provider_name,
             model=self.model_name,
             total_tokens=5,
@@ -126,7 +132,7 @@ class RecursiveRoundtableProvider:
             "### Orion\nRepeated technical view\n\n"
             "### Chris\nRepeated business view\n\n"
             "### Laura\nRepeated experience view\n\n"
-            "### Orkio\nPrioritize the smallest safe next step."
+            "### Orkio\nDECISION: Prioritize the smallest safe next step.\nPRIORITY: Speaker integrity.\nNEXT STEP: Re-run the roundtable.\nMAIN RISK: Recursive authorship.\nVERDICT: GO CONDITIONAL."
         )
         yield LLMStreamEvent.text_delta(recursive)
         yield LLMStreamEvent.completed(
@@ -173,7 +179,7 @@ def test_roundtable_stream_hides_recursive_owner_sections():
         for item in events
         if item["event"] == "agent_chunk"
     ]
-    assert chunks == ["Prioritize the smallest safe next step."]
+    assert chunks == ["DECISION: Prioritize the smallest safe next step.\nPRIORITY: Speaker integrity.\nNEXT STEP: Re-run the roundtable.\nMAIN RISK: Recursive authorship.\nVERDICT: GO CONDITIONAL."]
     assert [item["event"] for item in events][-2:] == [
         "agent_done",
         "done",
@@ -194,7 +200,7 @@ def test_roundtable_stream_hides_recursive_owner_sections():
     assert "Own viewpoint from Orion" in content
     assert "Own viewpoint from Chris" in content
     assert "Own viewpoint from Laura" in content
-    assert content.endswith("Prioritize the smallest safe next step.")
+    assert content.endswith("VERDICT: GO CONDITIONAL.")
 
     persisted = repository.list_messages(
         "tenant-a",

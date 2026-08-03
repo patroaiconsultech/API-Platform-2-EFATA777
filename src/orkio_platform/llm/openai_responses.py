@@ -165,7 +165,11 @@ class OpenAIResponsesProvider:
                 }
                 for message in messages
             ],
-            "max_output_tokens": self._max_output_tokens,
+            "max_output_tokens": (
+                min(self._max_output_tokens, request.max_output_tokens)
+                if request.max_output_tokens is not None
+                else self._max_output_tokens
+            ),
             "store": self._store_responses,
         }
 

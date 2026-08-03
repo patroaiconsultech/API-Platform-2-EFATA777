@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orkio-platform-backend-rc1"
-version = "0.6.2"
+version = "0.6.3"
 description = "ORKIO Plataforma 2.0 controlled RC1 test implementation"
 requires-python = ">=3.11"
 dependencies = [

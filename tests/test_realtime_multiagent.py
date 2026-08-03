@@ -36,11 +36,22 @@ class MultiAgentProvider:
         request: LLMCompletionRequest,
     ) -> Iterator[LLMStreamEvent]:
         self.stream_requests.append(request)
-        yield LLMStreamEvent.text_delta("Final ")
-        yield LLMStreamEvent.text_delta("answer")
+        if "visible roundtable" in request.system_prompt:
+            content = (
+                "DECISION: Proceed conditionally.\n"
+                "PRIORITY: Preserve speaker integrity.\n"
+                "NEXT STEP: Validate the wire evidence.\n"
+                "MAIN RISK: Contract regression.\n"
+                "VERDICT: GO CONDITIONAL."
+            )
+            yield LLMStreamEvent.text_delta(content)
+        else:
+            content = "Final answer"
+            yield LLMStreamEvent.text_delta("Final ")
+            yield LLMStreamEvent.text_delta("answer")
         yield LLMStreamEvent.completed(
             LLMResult(
-                content="Final answer",
+                content=content,
                 provider=self.provider_name,
                 model=self.model_name,
                 response_id="resp-owner",

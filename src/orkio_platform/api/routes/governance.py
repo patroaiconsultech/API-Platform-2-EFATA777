@@ -59,7 +59,33 @@ def governance_status(
         "execution_graph": "trace_lite",
         "capability_registry_entries": len(list_capabilities()),
         "capability_registry_contract": "evidence_aware_v1",
-        "roundtable_output_normalization": "speaker_scoped_v1",
+        "roundtable_output_normalization": "speaker_contract_v3",
+        "owner_decision_contract": "owner_decision_v3",
+        "knowledge_snapshot_version": "orkio-platform-r063-v1",
+        "multiagent_budget": {
+            "contribution_max_chars": (
+                settings.multiagent_contribution_max_chars
+            ),
+            "contribution_max_output_tokens": (
+                settings.multiagent_contribution_max_output_tokens
+            ),
+            "owner_max_output_tokens": (
+                settings.multiagent_owner_max_output_tokens
+            ),
+            "contribution_latency_budget_ms": (
+                settings.multiagent_contribution_latency_budget_ms
+            ),
+            "turn_latency_budget_ms": (
+                settings.multiagent_turn_latency_budget_ms
+            ),
+            "history_messages": settings.multiagent_history_messages,
+            "max_context_chars": (
+                settings.multiagent_max_context_chars
+            ),
+            "turn_max_total_tokens": (
+                settings.multiagent_turn_max_total_tokens
+            ),
+        },
         "agent_capability_truthfulness": True,
         "local_execution": True,
         "repository_backend": repository.backend_name,

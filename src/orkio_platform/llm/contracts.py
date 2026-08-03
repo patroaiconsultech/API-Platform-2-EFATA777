@@ -23,6 +23,7 @@ class LLMCompletionRequest:
     display_name: str
     system_prompt: str
     messages: tuple[LLMMessage, ...]
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from orkio_platform.domain.models import InteractionMode
 
@@ -38,6 +39,14 @@ class OrchestrationPlan:
         return bool(self.contributors)
 
 
+ContributionStatus = Literal[
+    "success",
+    "refused",
+    "contract_violation",
+    "failed",
+]
+
+
 @dataclass(frozen=True, slots=True)
 class AgentContribution:
     agent_id: str
@@ -49,6 +58,13 @@ class AgentContribution:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    status: ContributionStatus = "success"
+    status_reason: str | None = None
+    retry_count: int = 0
+    latency_ms: int | None = None
+    output_normalized: bool = False
+    budget_exceeded: bool = False
+    contract_version: str = "agent_contribution_v2"
 
     def token_usage(self) -> dict[str, int] | None:
         values = {
@@ -62,3 +78,7 @@ class AgentContribution:
             if value is not None
         }
         return normalized or None
+
+    @property
+    def validated(self) -> bool:
+        return self.status == "success"

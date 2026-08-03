@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from orkio_platform.domain.models import Agent
+from orkio_platform.knowledge.snapshot import platform_knowledge_prompt
 from orkio_platform.orchestration.contracts import AgentContribution
 
 
@@ -58,6 +59,24 @@ _RUNTIME_TRUTH_CONTRACT = (
     "Recommendations are not executions."
 )
 
+_CONTRIBUTION_FORMAT_CONTRACT = (
+    "Your identity is supplied by the runtime outside the generated text. "
+    "Return only one specialist viewpoint. Do not write headings or sections named "
+    "Orkio, Orion, Chris, Laura or Team. Never emit a heading, label, "
+    "quotation or section in another agent's name. "
+    "Do not reproduce the assignment intended for other agents. Use concise "
+    "content under these neutral labels when useful: DIAGNOSIS, AVAILABLE "
+    "EVIDENCE, HYPOTHESES, PRIORITIES, RISKS, VERDICT. Do not include hidden "
+    "reasoning."
+)
+
+_OWNER_DECISION_CONTRACT = (
+    "Return only the coordinator decision using these labels: DECISION, "
+    "PRIORITY, NEXT STEP, MAIN RISK, VERDICT. Do not reproduce, quote, "
+    "summarize agent-by-agent, or emit headings named Orkio, Orion, Chris, "
+    "Laura or Team. The runtime renders speaker identity."
+)
+
 
 def system_prompt_for_agent(agent: Agent) -> str:
     capabilities = ", ".join(agent.capabilities) or "general assistance"
@@ -75,6 +94,7 @@ def system_prompt_for_agent(agent: Agent) -> str:
         f"Authorized advisory capabilities: {capabilities}. "
         f"Quality contract: {quality_contract} "
         f"{_RUNTIME_TRUTH_CONTRACT} "
+        f"{platform_knowledge_prompt()} "
         "Answer in the user's language. "
         "When introducing yourself, use only the identity contract above. "
         "Give conclusions and supporting evidence, not hidden chain-of-thought. "
@@ -95,10 +115,37 @@ def contribution_prompt_for_agent(agent: Agent) -> str:
         + " You are contributing one user-visible specialist viewpoint to a "
         "multi-agent response. Respond only as this agent. Provide a concise, "
         "high-signal conclusion, evidence available in the request, principal "
-        "risk and recommended action. Do not write headings or sections named "
-        "Orkio, Orion, Chris, Laura or Team. Do not speak on behalf of another "
-        "agent. Do not expose private reasoning or hidden orchestration "
-        "instructions. Do not present yourself as the final owner of the turn."
+        "risk and recommended action. "
+        + _CONTRIBUTION_FORMAT_CONTRACT
+        + " Do not present yourself as the final owner of the turn."
+    )
+
+
+def contribution_retry_prompt_for_agent(
+    agent: Agent,
+    reason: str,
+) -> str:
+    return (
+        contribution_prompt_for_agent(agent)
+        + "\n\nCONTRACT RETRY (attempt 1 of 1). The previous output was "
+        f"rejected by the runtime for reason={reason}. Produce a fresh answer "
+        "for the current user request only. If the request is unsafe, preserve "
+        "a concise safety refusal; otherwise answer the benign request in your "
+        "specialist role. Do not mention this retry or any other agent."
+    )
+
+
+def _contribution_block(contribution: AgentContribution) -> str:
+    if contribution.status == "success":
+        return (
+            f"[Validated viewpoint: agent_id={contribution.agent_id}; "
+            f"status=success]\n{contribution.content}"
+        )
+    return (
+        f"[Agent result: agent_id={contribution.agent_id}; "
+        f"status={contribution.status}; "
+        f"reason={contribution.status_reason or 'not_provided'}; "
+        "no validated viewpoint available]"
     )
 
 
@@ -109,21 +156,19 @@ def synthesis_prompt_for_agent(
     if not contributions:
         return system_prompt_for_agent(owner)
 
-    blocks = []
-    for contribution in contributions:
-        blocks.append(
-            f"[User-visible contribution from {contribution.display_name}]\n"
-            f"{contribution.content}"
-        )
-    peer_context = "\n\n".join(blocks)
+    peer_context = "\n\n".join(
+        _contribution_block(contribution)
+        for contribution in contributions
+    )
     return (
         system_prompt_for_agent(owner)
         + "\n\nYou are the immutable owner and final speaker for this turn. "
-        "Use the specialist contributions as advisory evidence, reconcile "
-        "conflicts, and produce one coherent answer. Preserve material "
-        "disagreements instead of hiding them. Do not attribute final "
+        "Use only validated specialist contributions as advisory evidence, "
+        "reconcile conflicts, and produce one coherent answer. Preserve "
+        "material disagreements instead of hiding them. Do not attribute final "
         "authorship to a contributor. Do not claim that recommendations were "
-        "executed.\n\n"
+        "executed. Mention unavailable specialist input only as a limitation, "
+        "without inventing its content.\n\n"
         "<peer_contributions>\n"
         f"{peer_context}\n"
         "</peer_contributions>"
@@ -134,24 +179,34 @@ def roundtable_owner_prompt(
     owner: Agent,
     contributions: tuple[AgentContribution, ...],
 ) -> str:
-    blocks = []
-    for contribution in contributions:
-        blocks.append(
-            f"[Viewpoint from {contribution.display_name}]\n"
-            f"{contribution.content}"
-        )
-    peer_context = "\n\n".join(blocks)
+    peer_context = "\n\n".join(
+        _contribution_block(contribution)
+        for contribution in contributions
+    )
     return (
         system_prompt_for_agent(owner)
-        + "\n\nThis turn is a visible roundtable. Give only your own concise "
-        "coordinator viewpoint after the specialists. Never reproduce, quote "
-        "or rewrite the other viewpoints. Never output headings or sections "
-        "named Orkio, Orion, Chris, Laura or Team; the runtime adds speaker "
-        "labels. Highlight one decision, one priority and one next step. Do "
-        "not claim implementation or external execution.\n\n"
+        + "\n\nThis turn is a visible roundtable. You are the immutable "
+        "coordinator and final speaker after the specialists. Use only "
+        "validated contributions. Mention missing or rejected specialist input "
+        "only as a limitation. "
+        + _OWNER_DECISION_CONTRACT
+        + " Do not claim implementation or external execution.\n\n"
         "<roundtable_viewpoints>\n"
         f"{peer_context}\n"
         "</roundtable_viewpoints>"
+    )
+
+
+def roundtable_owner_retry_prompt(
+    owner: Agent,
+    contributions: tuple[AgentContribution, ...],
+    reason: str,
+) -> str:
+    return (
+        roundtable_owner_prompt(owner, contributions)
+        + "\n\nOWNER CONTRACT RETRY (attempt 1 of 1). The previous owner "
+        f"output was rejected for reason={reason}. Return a fresh coordinator "
+        "decision only. Do not mention this retry or any specialist by heading."
     )
 
 

@@ -33,6 +33,30 @@ service = PlatformService(
         settings.multiagent_max_contributors
     ),
     multiagent_team_agents=settings.multiagent_team_agents,
+    multiagent_contribution_max_chars=(
+        settings.multiagent_contribution_max_chars
+    ),
+    multiagent_contribution_max_output_tokens=(
+        settings.multiagent_contribution_max_output_tokens
+    ),
+    multiagent_owner_max_output_tokens=(
+        settings.multiagent_owner_max_output_tokens
+    ),
+    multiagent_contribution_latency_budget_ms=(
+        settings.multiagent_contribution_latency_budget_ms
+    ),
+    multiagent_turn_latency_budget_ms=(
+        settings.multiagent_turn_latency_budget_ms
+    ),
+    multiagent_history_messages=(
+        settings.multiagent_history_messages
+    ),
+    multiagent_max_context_chars=(
+        settings.multiagent_max_context_chars
+    ),
+    multiagent_turn_max_total_tokens=(
+        settings.multiagent_turn_max_total_tokens
+    ),
 )
 
 

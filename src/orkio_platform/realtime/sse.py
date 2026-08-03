@@ -52,6 +52,8 @@ def encode_pre_context_event(
         "payload": payload,
         "created_at": utc_now().isoformat(),
         "context_status": "NOT_RESOLVED",
+        "transport": "sse",
+        "terminal_source": "wire",
     }
     encoded = json.dumps(
         body,
@@ -170,6 +172,8 @@ def stream_chat(
             {
                 "status": "stream_open",
                 "replayed": not created,
+                "transport": "sse",
+                "terminal_source": "wire",
             },
         )
         yield emit(
@@ -184,6 +188,8 @@ def stream_chat(
                 ),
                 "trace_kind": context.trace_kind,
                 "replayed": not created,
+                "transport": "sse",
+                "terminal_source": "wire",
             },
         )
         yield emit(
@@ -247,6 +253,13 @@ def stream_chat(
                 started=started,
             )
 
+        response = response.model_copy(
+            update={
+                "transport": "sse",
+                "terminal_source": "wire",
+            }
+        )
+
         if response.status == "cancelled":
             yield emit(
                 "cancelled",
@@ -254,6 +267,8 @@ def stream_chat(
                     "message": response.model_dump(mode="json"),
                     "message_id": response.message_id,
                     "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
                 },
             )
             yield emit(
@@ -262,6 +277,13 @@ def stream_chat(
                     "outcome": "cancelled",
                     "message_id": response.message_id,
                     "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
+                    "done_observed": True,
+                    "event_count": sequence + 1,
+                    "last_event_id": (
+                        f"{context.execution_id}:{sequence + 1}"
+                    ),
                 },
             )
             return
@@ -273,6 +295,8 @@ def stream_chat(
                     **(response.error or {}),
                     "message_id": response.message_id,
                     "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
                 },
             )
             yield emit(
@@ -284,6 +308,13 @@ def stream_chat(
                     ).get("code", "EXECUTION_FAILED"),
                     "message_id": response.message_id,
                     "replayed": replayed,
+                    "transport": "sse",
+                    "terminal_source": "wire",
+                    "done_observed": True,
+                    "event_count": sequence + 1,
+                    "last_event_id": (
+                        f"{context.execution_id}:{sequence + 1}"
+                    ),
                 },
             )
             return
@@ -304,6 +335,9 @@ def stream_chat(
                 "content_length": len(response.content),
                 "agent_id": context.turn_owner,
                 "replayed": replayed,
+                "transport": "sse",
+                "terminal_source": "wire",
+                "agent_done_observed": True,
             },
         )
         yield emit(
@@ -312,6 +346,13 @@ def stream_chat(
                 "outcome": "success",
                 "message_id": response.message_id,
                 "replayed": replayed,
+                "transport": "sse",
+                "terminal_source": "wire",
+                "done_observed": True,
+                "event_count": sequence + 1,
+                "last_event_id": (
+                    f"{context.execution_id}:{sequence + 1}"
+                ),
             },
         )
     except DomainError as exc:
@@ -327,6 +368,13 @@ def stream_chat(
             {
                 "outcome": "error",
                 "error_code": exc.code,
+                "transport": "sse",
+                "terminal_source": "wire",
+                "done_observed": True,
+                "event_count": sequence + 1,
+                "last_event_id": (
+                    f"{context.execution_id}:{sequence + 1}"
+                ),
             },
         )
     except Exception:
@@ -342,5 +390,12 @@ def stream_chat(
             {
                 "outcome": "error",
                 "error_code": "SSE_GENERATOR_EXCEPTION",
+                "transport": "sse",
+                "terminal_source": "wire",
+                "done_observed": True,
+                "event_count": sequence + 1,
+                "last_event_id": (
+                    f"{context.execution_id}:{sequence + 1}"
+                ),
             },
         )
