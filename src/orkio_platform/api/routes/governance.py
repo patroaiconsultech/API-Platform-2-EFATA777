@@ -53,6 +53,15 @@ def governance_status(
         "realtime_streaming_enabled": (
             settings.realtime_streaming_enabled
         ),
+        "realtime_voice_enabled": settings.realtime_voice_enabled,
+        "realtime_voice_provider": settings.voice_provider,
+        "voice_actions_enabled": settings.voice_actions_enabled,
+        "multiagent_voice_enabled": settings.multiagent_voice_enabled,
+        "voice_contract": "voice_contract_v1.1.1",
+        "voice_provider_retention_confirmed": (
+            settings.voice_provider_retention_confirmed
+        ),
+        "voice_raw_audio_retention": settings.voice_raw_audio_retention,
         "multiagent_enabled": settings.multiagent_enabled,
         "multiagent_max_contributors": (
             settings.multiagent_max_contributors

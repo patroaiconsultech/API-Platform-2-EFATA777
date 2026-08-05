@@ -21,15 +21,15 @@ def _agent(agent_id: str) -> Agent:
 
 
 def test_r065_release_identity_is_consistent():
-    assert RELEASE_VERSION == "0.6.5"
+    assert RELEASE_VERSION == "0.7.0"
     assert (
         RELEASE_CANDIDATE
-        == "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5"
+        == "ORKIO-PREMIUM-REALTIME-VOICE-CORE-R0-7-0"
     )
-    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r065-v1"
+    assert KNOWLEDGE_SNAPSHOT_VERSION == "orkio-platform-r070-v1"
     assert (
         KNOWLEDGE_SNAPSHOT["release_id"]
-        == "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5"
+        == "ORKIO-PREMIUM-REALTIME-VOICE-CORE-R0-7-0"
     )
 
 

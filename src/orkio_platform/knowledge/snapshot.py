@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Final
 
 
-KNOWLEDGE_SNAPSHOT_VERSION: Final = "orkio-platform-r065-v1"
+KNOWLEDGE_SNAPSHOT_VERSION: Final = "orkio-platform-r070-v1"
 
 KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
     "version": KNOWLEDGE_SNAPSHOT_VERSION,
-    "release_id": "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5",
+    "release_id": "ORKIO-PREMIUM-REALTIME-VOICE-CORE-R0-7-0",
     "generated_at": "2026-08-03",
     "source_documents": (
         "PROTOCOLO MESTRE DANIEL",
@@ -16,6 +16,7 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "AO-01 superseding audit verdict",
         "R0.6.4 runtime golden-demo and task-decomposition evidence",
         "R0.6.5 responsive containment and tenant-truth patch evidence",
+        "Voice Contract v1.1.1 premium AO-01 candidate",
     ),
     "source_commit": "NOT_PROVEN",
     "facts": (
@@ -26,6 +27,7 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "Every SSE flow ends with done or error plus done.",
         "Current multiagent modes are single, team_synthesis and roundtable.",
         "The current known ORKIO stack is React/Vite, FastAPI, PostgreSQL, OpenAI Responses and textual SSE.",
+        "R0.7.0 introduces a feature-gated Orkio-only WebRTC voice core candidate with canonical transcript routing; deployment and real browser/provider proof remain pending.",
         "Tenant A being unable to read, rename or mutate tenant B is an expected security invariant, not a defect.",
         "A member being denied administrative access and a request without a valid tenant failing are expected security controls.",
         "R0.6.4 and later candidates isolate explicit tasks with task_slice_v1.",
@@ -36,7 +38,6 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "Tenant isolation and human approval cannot be weakened silently.",
     ),
     "planned_not_connected": (
-        "WebRTC voice-to-voice",
         "document analysis runtime",
         "DOCX/XLSX/PPTX/PDF artifact runtime",
         "persistent execution graph",
@@ -48,7 +49,7 @@ KNOWLEDGE_SNAPSHOT: Final[dict[str, object]] = {
         "This snapshot is read-only and may be stale.",
         "It is not live repository, database, log or deployment access.",
         "Current runtime evidence overrides this snapshot.",
-        "R0.6.5 features are local candidate capabilities until deployed.",
+        "R0.7.0 voice features are local candidate capabilities until deployed and validated.",
         "source_commit is not proven in this local artifact.",
     ),
 }

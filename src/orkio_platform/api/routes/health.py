@@ -22,6 +22,9 @@ def health() -> dict[str, object]:
         "realtime_streaming_enabled": (
             settings.realtime_streaming_enabled
         ),
+        "realtime_voice_enabled": settings.realtime_voice_enabled,
+        "realtime_voice_provider": settings.voice_provider,
+        "voice_contract": "voice_contract_v1.1.1",
         "multiagent_enabled": settings.multiagent_enabled,
         "assisted_evolution_enabled": (
             settings.assisted_evolution_enabled
@@ -51,6 +54,9 @@ def readiness() -> dict[str, object]:
         "realtime_streaming_enabled": (
             settings.realtime_streaming_enabled
         ),
+        "realtime_voice_enabled": settings.realtime_voice_enabled,
+        "realtime_voice_provider": settings.voice_provider,
+        "voice_contract": "voice_contract_v1.1.1",
         "multiagent_enabled": settings.multiagent_enabled,
         "assisted_evolution_enabled": (
             settings.assisted_evolution_enabled

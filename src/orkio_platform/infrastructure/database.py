@@ -1,8 +1,10 @@
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -138,6 +140,145 @@ Index(
     recovery_decisions.c.tenant_id,
     recovery_decisions.c.request_id,
     recovery_decisions.c.created_at,
+)
+
+
+voice_sessions = Table(
+    "voice_sessions",
+    metadata,
+    Column("tenant_id", String(120), primary_key=True),
+    Column("session_id", String(120), primary_key=True),
+    Column("thread_id", String(120), nullable=False),
+    Column("user_id", String(120), nullable=False),
+    Column("requested_agent", String(120), nullable=False),
+    Column("resolved_agent", String(120), nullable=False),
+    Column("turn_owner", String(120), nullable=False),
+    Column("ownership_locked", Boolean(), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("session_generation", Integer(), nullable=False),
+    Column("provider", String(80), nullable=False),
+    Column("provider_call_id", String(200)),
+    Column("source_connection_id", String(200)),
+    Column("last_canonical_sequence", Integer(), nullable=False),
+    Column("reconnect_attempts", Integer(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("connected_at", DateTime(timezone=True)),
+    Column("closed_at", DateTime(timezone=True)),
+    Column("close_reason", String(40)),
+    Column("microphone_released", Boolean(), nullable=False),
+    Column("player_released", Boolean(), nullable=False),
+    ForeignKeyConstraint(
+        ["tenant_id", "thread_id"],
+        ["threads.tenant_id", "threads.thread_id"],
+        ondelete="CASCADE",
+        name="fk_voice_sessions_thread_tenant",
+    ),
+)
+Index(
+    "ix_voice_sessions_tenant_thread_created_at",
+    voice_sessions.c.tenant_id,
+    voice_sessions.c.thread_id,
+    voice_sessions.c.created_at,
+)
+Index(
+    "ix_voice_sessions_tenant_status",
+    voice_sessions.c.tenant_id,
+    voice_sessions.c.status,
+)
+
+
+voice_turns = Table(
+    "voice_turns",
+    metadata,
+    Column("tenant_id", String(120), primary_key=True),
+    Column("session_id", String(120), primary_key=True),
+    Column("turn_id", String(120), primary_key=True),
+    Column("transcript_id", String(200), nullable=False),
+    Column("request_id", String(160), nullable=False),
+    Column("execution_id", String(120)),
+    Column("response_envelope_id", String(120)),
+    Column("status", String(20), nullable=False),
+    Column("user_transcript", Text(), nullable=False),
+    Column("assistant_content", Text()),
+    Column("assistant_content_sha256", String(64)),
+    Column("tts_input_sha256", String(64)),
+    Column("audio_status", String(20), nullable=False),
+    Column("spoken_content_complete", Boolean(), nullable=False),
+    Column("canonical_text_preserved", Boolean(), nullable=False),
+    Column("response_payload_json", Text()),
+    Column("error_code", String(120)),
+    Column("error_message", Text()),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    ForeignKeyConstraint(
+        ["tenant_id", "session_id"],
+        ["voice_sessions.tenant_id", "voice_sessions.session_id"],
+        ondelete="CASCADE",
+        name="fk_voice_turns_session_tenant",
+    ),
+    UniqueConstraint(
+        "tenant_id",
+        "session_id",
+        "transcript_id",
+        name="uq_voice_turns_tenant_session_transcript",
+    ),
+    UniqueConstraint(
+        "tenant_id",
+        "execution_id",
+        "response_envelope_id",
+        name="uq_voice_turns_tenant_execution_response",
+    ),
+)
+Index(
+    "ix_voice_turns_tenant_session_created_at",
+    voice_turns.c.tenant_id,
+    voice_turns.c.session_id,
+    voice_turns.c.created_at,
+)
+
+
+voice_events = Table(
+    "voice_events",
+    metadata,
+    Column("tenant_id", String(120), primary_key=True),
+    Column("event_id", String(160), primary_key=True),
+    Column("session_id", String(120), nullable=False),
+    Column("canonical_sequence", Integer(), nullable=False),
+    Column("source", String(40), nullable=False),
+    Column("source_event_key", String(200), nullable=False),
+    Column("event_type", String(200), nullable=False),
+    Column("session_generation", Integer(), nullable=False),
+    Column("source_sequence", Integer()),
+    Column("source_connection_id", String(200)),
+    Column("turn_id", String(120)),
+    Column("execution_id", String(120)),
+    Column("payload_json", Text(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["tenant_id", "session_id"],
+        ["voice_sessions.tenant_id", "voice_sessions.session_id"],
+        ondelete="CASCADE",
+        name="fk_voice_events_session_tenant",
+    ),
+    UniqueConstraint(
+        "tenant_id",
+        "session_id",
+        "canonical_sequence",
+        name="uq_voice_events_tenant_session_sequence",
+    ),
+    UniqueConstraint(
+        "tenant_id",
+        "session_id",
+        "source",
+        "source_event_key",
+        name="uq_voice_events_semantic_dedupe",
+    ),
+)
+Index(
+    "ix_voice_events_tenant_session_sequence",
+    voice_events.c.tenant_id,
+    voice_events.c.session_id,
+    voice_events.c.canonical_sequence,
 )
 
 

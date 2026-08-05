@@ -20,6 +20,11 @@ LLMProviderMode = Literal[
     "openai_responses",
 ]
 
+VoiceProviderMode = Literal[
+    "disabled",
+    "openai_realtime",
+]
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -163,6 +168,28 @@ class Settings(BaseModel):
     openai_store_responses: bool
 
     realtime_streaming_enabled: bool
+
+    realtime_voice_enabled: bool
+    voice_actions_enabled: bool
+    multiagent_voice_enabled: bool
+    voice_provider: VoiceProviderMode
+    openai_realtime_model: str
+    openai_realtime_voice: str
+    openai_realtime_transcription_model: str
+    voice_max_session_seconds: int
+    voice_idle_timeout_seconds: int
+    voice_max_reconnect_attempts: int
+    voice_reconnect_deadline_seconds: int
+    voice_resume_token_ttl_seconds: int
+    voice_resume_token_secret: SecretStr | None
+    voice_max_active_sessions_per_user: int
+    voice_raw_audio_retention: Literal["none", "tenant_policy"]
+    voice_transcript_retention: Literal["thread_policy"]
+    voice_provider_retention_confirmed: bool
+    voice_consent_required: bool
+    voice_audit_content: Literal["metadata_only"]
+    voice_log_transcript_content: bool
+
     multiagent_enabled: bool
     multiagent_max_contributors: int
     multiagent_team_agents: tuple[str, ...]
@@ -336,6 +363,67 @@ def get_settings() -> Settings:
         if openai_default_model is None:
             raise ValueError("OPENAI_DEFAULT_MODEL_REQUIRED")
 
+    requested_voice_provider = os.getenv(
+        "PLATFORM_VOICE_PROVIDER",
+        "disabled",
+    ).strip().lower()
+    allowed_voice_providers = {
+        "disabled",
+        "openai_realtime",
+    }
+    if requested_voice_provider not in allowed_voice_providers:
+        raise ValueError("PLATFORM_VOICE_PROVIDER_INVALID")
+    voice_provider: VoiceProviderMode = requested_voice_provider  # type: ignore[assignment]
+
+    realtime_voice_enabled = _env_bool(
+        "PLATFORM_REALTIME_VOICE_ENABLED",
+        False,
+    )
+    voice_provider_retention_confirmed = _env_bool(
+        "PLATFORM_VOICE_PROVIDER_RETENTION_CONFIRMED",
+        False,
+    )
+    raw_voice_resume_token_secret = _optional_env(
+        "PLATFORM_VOICE_RESUME_TOKEN_SECRET"
+    )
+    voice_resume_token_secret = (
+        None
+        if raw_voice_resume_token_secret is None
+        else SecretStr(raw_voice_resume_token_secret)
+    )
+    voice_raw_audio_retention = os.getenv(
+        "PLATFORM_VOICE_RAW_AUDIO_RETENTION",
+        "none",
+    ).strip().lower()
+    if voice_raw_audio_retention not in {"none", "tenant_policy"}:
+        raise ValueError("PLATFORM_VOICE_RAW_AUDIO_RETENTION_INVALID")
+    voice_transcript_retention = os.getenv(
+        "PLATFORM_VOICE_TRANSCRIPT_RETENTION",
+        "thread_policy",
+    ).strip().lower()
+    if voice_transcript_retention != "thread_policy":
+        raise ValueError("PLATFORM_VOICE_TRANSCRIPT_RETENTION_INVALID")
+    voice_audit_content = os.getenv(
+        "PLATFORM_VOICE_AUDIT_CONTENT",
+        "metadata_only",
+    ).strip().lower()
+    if voice_audit_content != "metadata_only":
+        raise ValueError("PLATFORM_VOICE_AUDIT_CONTENT_INVALID")
+
+    if realtime_voice_enabled:
+        if voice_provider != "openai_realtime":
+            raise ValueError("PLATFORM_VOICE_PROVIDER_REQUIRED")
+        if openai_api_key is None:
+            raise ValueError("OPENAI_API_KEY_REQUIRED_FOR_VOICE")
+        if not voice_provider_retention_confirmed:
+            raise ValueError(
+                "VOICE_PROVIDER_RETENTION_CONFIRMATION_REQUIRED"
+            )
+        if voice_resume_token_secret is None:
+            raise ValueError("PLATFORM_VOICE_RESUME_TOKEN_SECRET_REQUIRED")
+        if len(voice_resume_token_secret.get_secret_value()) < 32:
+            raise ValueError("PLATFORM_VOICE_RESUME_TOKEN_SECRET_TOO_SHORT")
+
     settings = Settings(
         app_name=os.getenv(
             "PLATFORM_API_TITLE",
@@ -481,6 +569,79 @@ def get_settings() -> Settings:
             "PLATFORM_REALTIME_STREAMING_ENABLED",
             False,
         ),
+        realtime_voice_enabled=realtime_voice_enabled,
+        voice_actions_enabled=_env_bool(
+            "PLATFORM_VOICE_ACTIONS_ENABLED",
+            False,
+        ),
+        multiagent_voice_enabled=_env_bool(
+            "PLATFORM_MULTIAGENT_VOICE_ENABLED",
+            False,
+        ),
+        voice_provider=voice_provider,
+        openai_realtime_model=os.getenv(
+            "OPENAI_REALTIME_MODEL",
+            "gpt-realtime",
+        ).strip(),
+        openai_realtime_voice=os.getenv(
+            "OPENAI_REALTIME_VOICE",
+            "marin",
+        ).strip(),
+        openai_realtime_transcription_model=os.getenv(
+            "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
+            "gpt-4o-mini-transcribe",
+        ).strip(),
+        voice_max_session_seconds=_env_int(
+            "PLATFORM_VOICE_MAX_SESSION_SECONDS",
+            1800,
+            minimum=60,
+            maximum=14_400,
+        ),
+        voice_idle_timeout_seconds=_env_int(
+            "PLATFORM_VOICE_IDLE_TIMEOUT_SECONDS",
+            120,
+            minimum=15,
+            maximum=3600,
+        ),
+        voice_max_reconnect_attempts=_env_int(
+            "PLATFORM_VOICE_MAX_RECONNECT_ATTEMPTS",
+            3,
+            minimum=0,
+            maximum=20,
+        ),
+        voice_reconnect_deadline_seconds=_env_int(
+            "PLATFORM_VOICE_RECONNECT_DEADLINE_SECONDS",
+            30,
+            minimum=1,
+            maximum=300,
+        ),
+        voice_resume_token_ttl_seconds=_env_int(
+            "PLATFORM_VOICE_RESUME_TOKEN_TTL_SECONDS",
+            120,
+            minimum=15,
+            maximum=3600,
+        ),
+        voice_resume_token_secret=voice_resume_token_secret,
+        voice_max_active_sessions_per_user=_env_int(
+            "PLATFORM_VOICE_MAX_ACTIVE_SESSIONS_PER_USER",
+            1,
+            minimum=1,
+            maximum=5,
+        ),
+        voice_raw_audio_retention=voice_raw_audio_retention,  # type: ignore[arg-type]
+        voice_transcript_retention=voice_transcript_retention,  # type: ignore[arg-type]
+        voice_provider_retention_confirmed=(
+            voice_provider_retention_confirmed
+        ),
+        voice_consent_required=_env_bool(
+            "PLATFORM_VOICE_CONSENT_REQUIRED",
+            True,
+        ),
+        voice_audit_content=voice_audit_content,  # type: ignore[arg-type]
+        voice_log_transcript_content=_env_bool(
+            "PLATFORM_VOICE_LOG_TRANSCRIPT_CONTENT",
+            False,
+        ),
         multiagent_enabled=_env_bool(
             "PLATFORM_MULTIAGENT_ENABLED",
             False,
@@ -554,6 +715,23 @@ def get_settings() -> Settings:
         and not settings.oidc_configured
     ):
         raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
+    if settings.realtime_voice_enabled:
+        if not settings.openai_realtime_model:
+            raise ValueError("OPENAI_REALTIME_MODEL_REQUIRED")
+        if not settings.openai_realtime_voice:
+            raise ValueError("OPENAI_REALTIME_VOICE_REQUIRED")
+        if not settings.openai_realtime_transcription_model:
+            raise ValueError(
+                "OPENAI_REALTIME_TRANSCRIPTION_MODEL_REQUIRED"
+            )
+    if settings.voice_actions_enabled and not settings.realtime_voice_enabled:
+        raise ValueError("VOICE_ACTIONS_REQUIRE_REALTIME_VOICE")
+    if (
+        settings.multiagent_voice_enabled
+        and not settings.realtime_voice_enabled
+    ):
+        raise ValueError("MULTIAGENT_VOICE_REQUIRES_REALTIME_VOICE")
+
     if not settings.oidc_user_claim:
         raise ValueError("PLATFORM_OIDC_USER_CLAIM_INVALID")
     if not settings.oidc_tenant_claim:

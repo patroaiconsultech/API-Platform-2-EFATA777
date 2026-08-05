@@ -1,7 +1,7 @@
 {
-  "release_id": "ORKIO-PREMIUM-RESPONSIVE-TENANT-TRUTH-R0-6-5",
-  "display_version": "R0.6.5",
-  "release_version": "0.6.5",
+  "release_id": "ORKIO-PREMIUM-REALTIME-VOICE-CORE-R0-7-0",
+  "display_version": "R0.7.0",
+  "release_version": "0.7.0",
   "component": "backend",
   "channel": "audit-candidate"
 }

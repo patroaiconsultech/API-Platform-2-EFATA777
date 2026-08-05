@@ -12,6 +12,7 @@ from orkio_platform.api.routes import (
     governance,
     health,
     threads,
+    voice,
 )
 from orkio_platform.config import get_settings
 from orkio_platform.domain.errors import DomainError
@@ -62,6 +63,7 @@ def create_app() -> FastAPI:
         agents.router,
         threads.router,
         chat.router,
+        voice.router,
         admin.router,
         governance.router,
     ]:

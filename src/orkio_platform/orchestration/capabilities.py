@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+from orkio_platform.config import get_settings
 from orkio_platform.orchestration.contracts import CapabilityDefinition
 
 
@@ -186,18 +189,26 @@ CAPABILITIES: tuple[CapabilityDefinition, ...] = (
     CapabilityDefinition(
         capability_id="realtime_voice_webrtc",
         agent_id="Orkio",
-        description="WebRTC voice session routed through the canonical orchestration pipeline.",
-        inputs=("audio", "tenant_context", "thread_context"),
-        outputs=("transcript", "orchestrated_audio_response"),
-        permissions=(),
+        description="WebRTC voice session routed through the canonical ORKIO orchestration pipeline.",
+        inputs=("audio", "tenant_context", "thread_context", "consent"),
+        outputs=("final_transcript", "canonical_response", "spoken_response"),
+        permissions=("microphone", "read_thread", "write_thread_messages"),
         risk_level="high",
         governance_required=True,
-        runtime="not_connected",
-        status="planned",
-        version="roadmap",
-        availability="planned",
-        evidence=(),
-        limitations=("voice-to-voice WebRTC bridge is not implemented",),
+        runtime="openai_realtime+canonical_bridge",
+        status="feature_gated",
+        version="1.0.0",
+        availability="feature_gated",
+        evidence=(
+            "voice session/turn/event contracts",
+            "backend-only canonical journal",
+            "Orkio-only canonical turn bridge",
+        ),
+        limitations=(
+            "requires provider configuration and retention confirmation",
+            "multiagent voice and governed voice actions are disabled",
+            "real browser/provider runtime proof remains required",
+        ),
         human_approval_required=True,
     ),
     CapabilityDefinition(
@@ -221,8 +232,35 @@ CAPABILITIES: tuple[CapabilityDefinition, ...] = (
 
 
 def list_capabilities() -> tuple[CapabilityDefinition, ...]:
-    return CAPABILITIES
+    settings = get_settings()
+    items: list[CapabilityDefinition] = []
+    for item in CAPABILITIES:
+        if item.capability_id != "realtime_voice_webrtc":
+            items.append(item)
+            continue
+        if (
+            settings.realtime_voice_enabled
+            and settings.voice_provider == "openai_realtime"
+            and settings.voice_provider_retention_confirmed
+        ):
+            items.append(
+                replace(
+                    item,
+                    status="active",
+                    availability="available",
+                    evidence=item.evidence
+                    + (
+                        "runtime feature gate enabled",
+                        "provider retention confirmed",
+                    ),
+                )
+            )
+        else:
+            items.append(item)
+    return tuple(items)
 
 
 def capabilities_for_agent(agent_id: str) -> tuple[CapabilityDefinition, ...]:
-    return tuple(item for item in CAPABILITIES if item.agent_id == agent_id)
+    return tuple(
+        item for item in list_capabilities() if item.agent_id == agent_id
+    )
