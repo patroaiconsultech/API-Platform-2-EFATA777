@@ -1,0 +1,1 @@
+"""Governed external integration adapters."""

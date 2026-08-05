@@ -153,6 +153,39 @@ CAPABILITIES: tuple[CapabilityDefinition, ...] = (
         human_approval_required=True,
     ),
     CapabilityDefinition(
+        capability_id="github_repository_readonly",
+        agent_id="Orion",
+        description=(
+            "Read metadata, trees, text files and diffs from explicitly "
+            "allowlisted GitHub repositories for evidence-based audits."
+        ),
+        inputs=("audit_objective", "allowlisted_repository", "ref"),
+        outputs=("repository_evidence", "commit_sha", "evidence_map"),
+        permissions=(
+            "repository_metadata_read",
+            "repository_contents_read",
+            "repository_diff_read",
+        ),
+        risk_level="high",
+        governance_required=True,
+        runtime="github_rest_api",
+        status="feature_gated",
+        version="1.0.0",
+        availability="feature_gated",
+        evidence=(
+            "backend-only authentication",
+            "repository allowlist",
+            "read-only HTTP client",
+            "bounded evidence injection",
+        ),
+        limitations=(
+            "requires GitHub connector configuration",
+            "restricted to authorized principals",
+            "no repository writes, branches, commits, PRs, merges or workflows",
+        ),
+        human_approval_required=False,
+    ),
+    CapabilityDefinition(
         capability_id="architecture_indexer",
         agent_id="Orion",
         description="Index repositories, runtime paths, commits and technical evidence.",
@@ -233,30 +266,95 @@ CAPABILITIES: tuple[CapabilityDefinition, ...] = (
 
 def list_capabilities() -> tuple[CapabilityDefinition, ...]:
     settings = get_settings()
+    github_active = (
+        settings.github_integration_enabled
+        and settings.github_configured
+        and settings.github_orion_auto_audit_enabled
+        and settings.github_read_only
+    )
     items: list[CapabilityDefinition] = []
     for item in CAPABILITIES:
-        if item.capability_id != "realtime_voice_webrtc":
-            items.append(item)
-            continue
-        if (
-            settings.realtime_voice_enabled
-            and settings.voice_provider == "openai_realtime"
-            and settings.voice_provider_retention_confirmed
-        ):
-            items.append(
-                replace(
-                    item,
-                    status="active",
-                    availability="available",
-                    evidence=item.evidence
-                    + (
-                        "runtime feature gate enabled",
-                        "provider retention confirmed",
-                    ),
+        if item.capability_id == "realtime_voice_webrtc":
+            if (
+                settings.realtime_voice_enabled
+                and settings.voice_provider == "openai_realtime"
+                and settings.voice_provider_retention_confirmed
+            ):
+                items.append(
+                    replace(
+                        item,
+                        status="active",
+                        availability="available",
+                        evidence=item.evidence
+                        + (
+                            "runtime feature gate enabled",
+                            "provider retention confirmed",
+                        ),
+                    )
                 )
-            )
-        else:
-            items.append(item)
+            else:
+                items.append(item)
+            continue
+
+        if item.capability_id == "technical_architecture":
+            if github_active:
+                limitations = tuple(
+                    limitation
+                    for limitation in item.limitations
+                    if limitation != "no repository tool connected"
+                ) + (
+                    "repository access is read-only and allowlisted",
+                )
+                items.append(
+                    replace(
+                        item,
+                        evidence=item.evidence
+                        + (
+                            "github_repository_readonly tool connected",
+                        ),
+                        limitations=limitations,
+                    )
+                )
+            else:
+                items.append(item)
+            continue
+
+        if item.capability_id in {
+            "github_repository_readonly",
+            "architecture_indexer",
+        }:
+            if github_active:
+                items.append(
+                    replace(
+                        item,
+                        runtime="github_rest_api",
+                        status="active",
+                        availability="available",
+                        version="1.0.0",
+                        permissions=(
+                            "repository_metadata_read",
+                            "repository_contents_read",
+                            "repository_diff_read",
+                        ),
+                        evidence=item.evidence
+                        + (
+                            "runtime configuration validated",
+                            "Orion auto-audit bridge enabled",
+                        ),
+                        limitations=(
+                            "allowlisted repositories only",
+                            "authorized principals only",
+                            "live GitHub availability is checked per request",
+                            "no repository write operations",
+                        ),
+                        human_approval_required=False,
+                    )
+                )
+            else:
+                items.append(item)
+            continue
+
+        items.append(item)
     return tuple(items)
 
 

@@ -52,6 +52,9 @@ from orkio_platform.domain.models import (
 from orkio_platform.infrastructure.repository_protocol import (
     RepositoryProtocol,
 )
+from orkio_platform.integrations.repository_audit import (
+    RepositoryAuditProvider,
+)
 from orkio_platform.observability.execution import log_execution_event
 from orkio_platform.orchestration.contracts import AgentContribution
 from orkio_platform.orchestration.task_decomposition import (
@@ -93,6 +96,7 @@ class PlatformService:
         multiagent_history_messages: int = 4,
         multiagent_max_context_chars: int = 20_000,
         multiagent_turn_max_total_tokens: int = 7_000,
+        repository_audit_provider: RepositoryAuditProvider | None = None,
         knowledge_snapshot_version: str = KNOWLEDGE_SNAPSHOT_VERSION,
     ) -> None:
         if execution_lease_seconds <= 0:
@@ -161,6 +165,7 @@ class PlatformService:
         self.multiagent_turn_max_total_tokens = (
             multiagent_turn_max_total_tokens
         )
+        self.repository_audit_provider = repository_audit_provider
         self.knowledge_snapshot_version = (
             knowledge_snapshot_version.strip()
         )
@@ -238,6 +243,7 @@ class PlatformService:
             thread_id=request.thread_id,
             tenant_id=principal.tenant_id,
             user_id=principal.user_id,
+            principal_role=principal.role,
             requested_agent=plan.requested_agent,
             resolved_agent=owner.agent_id,
             turn_owner=owner.agent_id,
@@ -560,6 +566,22 @@ class PlatformService:
         )
 
 
+    def _repository_audit_prompt_block(
+        self,
+        context: AgentTurnContext,
+        request: ChatRequest,
+    ) -> str:
+        provider = self.repository_audit_provider
+        if provider is None:
+            return ""
+        evidence = provider.maybe_collect(
+            context,
+            request.content,
+        )
+        if evidence is None:
+            return ""
+        return evidence.prompt_block
+
     def _owner_request(
         self,
         context: AgentTurnContext,
@@ -593,6 +615,13 @@ class PlatformService:
                 owner,
                 contributions,
             )
+
+        repository_prompt_block = self._repository_audit_prompt_block(
+            context,
+            request,
+        )
+        if repository_prompt_block:
+            system_prompt = system_prompt + repository_prompt_block
 
         multiagent_request = context.interaction_mode != "single"
         return self._llm_request_for_agent(

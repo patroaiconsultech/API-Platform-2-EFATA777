@@ -111,6 +111,7 @@ class AgentTurnContext(BaseModel):
     thread_id: str
     tenant_id: str
     user_id: str
+    principal_role: Literal["member", "admin", "auditor"] = "member"
     requested_agent: str
     resolved_agent: str
     turn_owner: str

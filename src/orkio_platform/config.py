@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import os
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -23,6 +25,13 @@ LLMProviderMode = Literal[
 VoiceProviderMode = Literal[
     "disabled",
     "openai_realtime",
+]
+
+
+GitHubAuthMode = Literal[
+    "disabled",
+    "token",
+    "github_app",
 ]
 
 
@@ -190,6 +199,38 @@ class Settings(BaseModel):
     voice_audit_content: Literal["metadata_only"]
     voice_log_transcript_content: bool
 
+    github_integration_enabled: bool
+    github_read_only: bool
+    github_auth_mode: GitHubAuthMode
+    github_token: SecretStr | None
+    github_app_id: str | None
+    github_app_installation_id: int | None
+    github_app_private_key_b64: SecretStr | None
+    github_api_base_url: str
+    github_api_version: str
+    github_allowed_repositories: tuple[str, ...]
+    github_default_ref: str
+    github_http_timeout_seconds: int
+    github_audit_deadline_seconds: int
+    github_max_response_bytes: int
+    github_max_tree_entries: int
+    github_max_files_per_audit: int
+    github_max_file_bytes: int
+    github_max_total_chars: int
+    github_allow_content_read: bool
+    github_allow_metadata_read: bool
+    github_allow_diff_read: bool
+    github_allowed_roles: tuple[str, ...]
+    github_allowed_tenants: tuple[str, ...]
+    github_allowed_users: tuple[str, ...]
+    github_orion_auto_audit_enabled: bool
+    github_allow_write: bool
+    github_allow_branch_create: bool
+    github_allow_commit: bool
+    github_allow_pull_request: bool
+    github_allow_merge: bool
+    github_allow_workflow_dispatch: bool
+
     multiagent_enabled: bool
     multiagent_max_contributors: int
     multiagent_team_agents: tuple[str, ...]
@@ -217,6 +258,24 @@ class Settings(BaseModel):
             self.oidc_redirect_uri,
         )
         return all(required)
+
+    @property
+    def github_configured(self) -> bool:
+        if not self.github_integration_enabled:
+            return False
+        if not self.github_allowed_repositories:
+            return False
+        if self.github_auth_mode == "token":
+            return self.github_token is not None
+        if self.github_auth_mode == "github_app":
+            return all(
+                (
+                    self.github_app_id,
+                    self.github_app_installation_id,
+                    self.github_app_private_key_b64,
+                )
+            )
+        return False
 
 
 @lru_cache(maxsize=1)
@@ -423,6 +482,211 @@ def get_settings() -> Settings:
             raise ValueError("PLATFORM_VOICE_RESUME_TOKEN_SECRET_REQUIRED")
         if len(voice_resume_token_secret.get_secret_value()) < 32:
             raise ValueError("PLATFORM_VOICE_RESUME_TOKEN_SECRET_TOO_SHORT")
+
+    github_integration_enabled = _env_bool(
+        "PLATFORM_GITHUB_INTEGRATION_ENABLED",
+        False,
+    )
+    github_read_only = _env_bool(
+        "PLATFORM_GITHUB_READ_ONLY",
+        True,
+    )
+    requested_github_auth_mode = os.getenv(
+        "PLATFORM_GITHUB_AUTH_MODE",
+        "disabled",
+    ).strip().lower()
+    allowed_github_auth_modes = {
+        "disabled",
+        "token",
+        "github_app",
+    }
+    if requested_github_auth_mode not in allowed_github_auth_modes:
+        raise ValueError("PLATFORM_GITHUB_AUTH_MODE_INVALID")
+    github_auth_mode: GitHubAuthMode = requested_github_auth_mode  # type: ignore[assignment]
+
+    github_api_base_url = os.getenv(
+        "PLATFORM_GITHUB_API_BASE_URL",
+        "https://api.github.com",
+    ).strip().rstrip("/")
+    if not github_api_base_url:
+        raise ValueError("PLATFORM_GITHUB_API_BASE_URL_INVALID")
+    _require_https(
+        "PLATFORM_GITHUB_API_BASE_URL",
+        github_api_base_url,
+        production=production,
+    )
+    if github_api_base_url != "https://api.github.com":
+        raise ValueError(
+            "PLATFORM_GITHUB_API_BASE_URL_UNSUPPORTED"
+        )
+    github_api_version = os.getenv(
+        "PLATFORM_GITHUB_API_VERSION",
+        "2026-03-10",
+    ).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", github_api_version):
+        raise ValueError("PLATFORM_GITHUB_API_VERSION_INVALID")
+
+    github_allowed_repositories = _env_csv(
+        "PLATFORM_GITHUB_ALLOWED_REPOSITORIES",
+        (),
+    )
+    repository_pattern = re.compile(
+        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    )
+    if any(
+        not repository_pattern.fullmatch(repository)
+        for repository in github_allowed_repositories
+    ):
+        raise ValueError(
+            "PLATFORM_GITHUB_ALLOWED_REPOSITORIES_INVALID"
+        )
+    if len(github_allowed_repositories) > 100:
+        raise ValueError(
+            "PLATFORM_GITHUB_ALLOWED_REPOSITORIES_LIMIT_EXCEEDED"
+        )
+    normalized_repositories = {
+        repository.casefold()
+        for repository in github_allowed_repositories
+    }
+    if len(normalized_repositories) != len(
+        github_allowed_repositories
+    ):
+        raise ValueError(
+            "PLATFORM_GITHUB_ALLOWED_REPOSITORIES_DUPLICATED"
+        )
+
+    github_default_ref = os.getenv(
+        "PLATFORM_GITHUB_DEFAULT_REF",
+        "main",
+    ).strip()
+    if (
+        not github_default_ref
+        or ".." in github_default_ref
+        or any(character.isspace() for character in github_default_ref)
+    ):
+        raise ValueError("PLATFORM_GITHUB_DEFAULT_REF_INVALID")
+
+    github_token_value = _optional_env("PLATFORM_GITHUB_TOKEN")
+    github_token = (
+        SecretStr(github_token_value)
+        if github_token_value is not None
+        else None
+    )
+    github_app_private_key_value = _optional_env(
+        "PLATFORM_GITHUB_APP_PRIVATE_KEY_B64"
+    )
+    github_app_private_key_b64 = (
+        SecretStr(github_app_private_key_value)
+        if github_app_private_key_value is not None
+        else None
+    )
+    raw_installation_id = _optional_env(
+        "PLATFORM_GITHUB_APP_INSTALLATION_ID"
+    )
+    try:
+        github_app_installation_id = (
+            None
+            if raw_installation_id is None
+            else int(raw_installation_id)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "PLATFORM_GITHUB_APP_INSTALLATION_ID_INVALID"
+        ) from exc
+    if (
+        github_app_installation_id is not None
+        and github_app_installation_id <= 0
+    ):
+        raise ValueError(
+            "PLATFORM_GITHUB_APP_INSTALLATION_ID_INVALID"
+        )
+
+    github_allowed_roles = _env_csv(
+        "PLATFORM_GITHUB_ALLOWED_ROLES",
+        ("admin",),
+    )
+    valid_github_roles = {"member", "admin", "auditor"}
+    if (
+        not github_allowed_roles
+        or any(
+            role not in valid_github_roles
+            for role in github_allowed_roles
+        )
+    ):
+        raise ValueError("PLATFORM_GITHUB_ALLOWED_ROLES_INVALID")
+
+    github_allow_write = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_WRITE",
+        False,
+    )
+    github_allow_branch_create = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_BRANCH_CREATE",
+        False,
+    )
+    github_allow_commit = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_COMMIT",
+        False,
+    )
+    github_allow_pull_request = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_PULL_REQUEST",
+        False,
+    )
+    github_allow_merge = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_MERGE",
+        False,
+    )
+    github_allow_workflow_dispatch = _env_bool(
+        "PLATFORM_GITHUB_ALLOW_WORKFLOW_DISPATCH",
+        False,
+    )
+    if any(
+        (
+            github_allow_write,
+            github_allow_branch_create,
+            github_allow_commit,
+            github_allow_pull_request,
+            github_allow_merge,
+            github_allow_workflow_dispatch,
+        )
+    ):
+        raise ValueError("PLATFORM_GITHUB_READONLY_VIOLATION")
+    if not github_read_only:
+        raise ValueError("PLATFORM_GITHUB_READ_ONLY_REQUIRED")
+
+    if github_integration_enabled:
+        if github_auth_mode == "disabled":
+            raise ValueError("PLATFORM_GITHUB_AUTH_MODE_REQUIRED")
+        if not github_allowed_repositories:
+            raise ValueError(
+                "PLATFORM_GITHUB_ALLOWED_REPOSITORIES_REQUIRED"
+            )
+        if github_auth_mode == "token" and github_token is None:
+            raise ValueError("PLATFORM_GITHUB_TOKEN_REQUIRED")
+        if github_auth_mode == "github_app":
+            github_app_id = _optional_env(
+                "PLATFORM_GITHUB_APP_ID"
+            )
+            if (
+                github_app_id is None
+                or github_app_installation_id is None
+                or github_app_private_key_b64 is None
+            ):
+                raise ValueError(
+                    "PLATFORM_GITHUB_APP_CONFIGURATION_INCOMPLETE"
+                )
+            try:
+                decoded_private_key = base64.b64decode(
+                    github_app_private_key_b64.get_secret_value(),
+                    validate=True,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    "PLATFORM_GITHUB_APP_PRIVATE_KEY_B64_INVALID"
+                ) from exc
+            if b"PRIVATE KEY" not in decoded_private_key:
+                raise ValueError(
+                    "PLATFORM_GITHUB_APP_PRIVATE_KEY_B64_INVALID"
+                )
 
     settings = Settings(
         app_name=os.getenv(
@@ -642,6 +906,92 @@ def get_settings() -> Settings:
             "PLATFORM_VOICE_LOG_TRANSCRIPT_CONTENT",
             False,
         ),
+        github_integration_enabled=github_integration_enabled,
+        github_read_only=github_read_only,
+        github_auth_mode=github_auth_mode,
+        github_token=github_token,
+        github_app_id=_optional_env("PLATFORM_GITHUB_APP_ID"),
+        github_app_installation_id=github_app_installation_id,
+        github_app_private_key_b64=github_app_private_key_b64,
+        github_api_base_url=github_api_base_url,
+        github_api_version=github_api_version,
+        github_allowed_repositories=github_allowed_repositories,
+        github_default_ref=github_default_ref,
+        github_http_timeout_seconds=_env_int(
+            "PLATFORM_GITHUB_HTTP_TIMEOUT_SECONDS",
+            20,
+            minimum=1,
+            maximum=120,
+        ),
+        github_audit_deadline_seconds=_env_int(
+            "PLATFORM_GITHUB_AUDIT_DEADLINE_SECONDS",
+            60,
+            minimum=5,
+            maximum=300,
+        ),
+        github_max_response_bytes=_env_int(
+            "PLATFORM_GITHUB_MAX_RESPONSE_BYTES",
+            8_000_000,
+            minimum=100_000,
+            maximum=10_000_000,
+        ),
+        github_max_tree_entries=_env_int(
+            "PLATFORM_GITHUB_MAX_TREE_ENTRIES",
+            5_000,
+            minimum=1,
+            maximum=100_000,
+        ),
+        github_max_files_per_audit=_env_int(
+            "PLATFORM_GITHUB_MAX_FILES_PER_AUDIT",
+            24,
+            minimum=1,
+            maximum=200,
+        ),
+        github_max_file_bytes=_env_int(
+            "PLATFORM_GITHUB_MAX_FILE_BYTES",
+            250_000,
+            minimum=1_000,
+            maximum=5_000_000,
+        ),
+        github_max_total_chars=_env_int(
+            "PLATFORM_GITHUB_MAX_TOTAL_CHARS",
+            80_000,
+            minimum=5_000,
+            maximum=500_000,
+        ),
+        github_allow_content_read=_env_bool(
+            "PLATFORM_GITHUB_ALLOW_CONTENT_READ",
+            True,
+        ),
+        github_allow_metadata_read=_env_bool(
+            "PLATFORM_GITHUB_ALLOW_METADATA_READ",
+            True,
+        ),
+        github_allow_diff_read=_env_bool(
+            "PLATFORM_GITHUB_ALLOW_DIFF_READ",
+            True,
+        ),
+        github_allowed_roles=github_allowed_roles,
+        github_allowed_tenants=_env_csv(
+            "PLATFORM_GITHUB_ALLOWED_TENANTS",
+            (),
+        ),
+        github_allowed_users=_env_csv(
+            "PLATFORM_GITHUB_ALLOWED_USERS",
+            (),
+        ),
+        github_orion_auto_audit_enabled=_env_bool(
+            "PLATFORM_GITHUB_ORION_AUTO_AUDIT_ENABLED",
+            False,
+        ),
+        github_allow_write=github_allow_write,
+        github_allow_branch_create=github_allow_branch_create,
+        github_allow_commit=github_allow_commit,
+        github_allow_pull_request=github_allow_pull_request,
+        github_allow_merge=github_allow_merge,
+        github_allow_workflow_dispatch=(
+            github_allow_workflow_dispatch
+        ),
         multiagent_enabled=_env_bool(
             "PLATFORM_MULTIAGENT_ENABLED",
             False,
@@ -740,6 +1090,24 @@ def get_settings() -> Settings:
         raise ValueError("PLATFORM_OIDC_ROLES_CLAIM_INVALID")
     if not settings.oidc_member_roles:
         raise ValueError("PLATFORM_OIDC_MEMBER_ROLES_REQUIRED")
+    if (
+        settings.github_orion_auto_audit_enabled
+        and not settings.github_integration_enabled
+    ):
+        raise ValueError(
+            "PLATFORM_GITHUB_ORION_AUTO_AUDIT_REQUIRES_INTEGRATION"
+        )
+    if (
+        settings.github_integration_enabled
+        and not (
+            settings.github_allow_metadata_read
+            or settings.github_allow_content_read
+        )
+    ):
+        raise ValueError(
+            "PLATFORM_GITHUB_READ_PERMISSION_REQUIRED"
+        )
+
     allowed_team_agents = {"Orion", "Chris", "Laura"}
     if any(
         agent_id not in allowed_team_agents

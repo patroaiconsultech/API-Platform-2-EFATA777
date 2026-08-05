@@ -11,6 +11,9 @@ from orkio_platform.domain.models import (
     ResponseEnvelope,
 )
 from orkio_platform.infrastructure.repositories import repository
+from orkio_platform.integrations.repository_audit import (
+    GitHubRepositoryAuditProvider,
+)
 from orkio_platform.llm.factory import build_llm_provider
 from orkio_platform.realtime.sse import stream_chat
 
@@ -56,6 +59,9 @@ service = PlatformService(
     ),
     multiagent_turn_max_total_tokens=(
         settings.multiagent_turn_max_total_tokens
+    ),
+    repository_audit_provider=GitHubRepositoryAuditProvider(
+        settings,
     ),
 )
 
