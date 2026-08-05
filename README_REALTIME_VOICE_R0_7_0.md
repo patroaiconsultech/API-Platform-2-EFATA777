@@ -9,7 +9,7 @@ canonical ORKIO text runtime:
 ```text
 browser microphone
 → WebRTC media plane
-→ provider final transcript
+→ browser-delivered final transcript
 → backend canonical voice turn
 → PlatformService.complete_chat
 → canonical Orkio ResponseEnvelope
@@ -35,10 +35,11 @@ GET  /api/voice/sessions/{session_id}
 
 ## Database
 
-Additive migration:
+Additive migration chain:
 
 ```text
 004_realtime_voice_core
+→ 005_realtime_voice_premium_identity
 ```
 
 Tables:
@@ -47,18 +48,34 @@ Tables:
 voice_sessions
 voice_turns
 voice_events
+voice_resume_tokens
 ```
 
-The semantic event dedupe key excludes `session_generation`:
+The event identity contract separates:
 
 ```text
-tenant_id + session_id + source + source_event_key
+source_delivery_id
+→ one concrete browser/provider delivery
+
+semantic_operation_id
+→ stable across retry and reconnect
+
+canonical_event_id
+→ allocated once by the canonical journal
+```
+
+Semantic dedupe excludes `session_generation`:
+
+```text
+tenant_id + session_id + source + semantic_operation_id
 ```
 
 The session row is locked by the backend canonical journal before sequence
 allocation. Reconnect uses a short-lived HMAC-signed resume token bound to
-tenant, user, thread, session and session generation. Tokens rotate after each
-successful resume.
+tenant, user, thread, session and session generation. Only the non-secret JTI
+is persisted. Consumption of the JTI and session-generation transition occur
+in the same store transaction. Closing and closed journal events plus the
+terminal session row update also share one database transaction.
 
 ## Feature gates
 

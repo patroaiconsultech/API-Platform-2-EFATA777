@@ -75,15 +75,39 @@ class VoiceSessionRecord(BaseModel):
     player_released: bool = False
 
 
+class VoiceResumeTokenRecord(BaseModel):
+    """Persisted, single-use resume-token identity.
+
+    The signed token itself is never stored. Only its non-secret JTI and
+    lifecycle timestamps are persisted so consumption can be enforced
+    atomically with the session generation transition.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: str = Field(min_length=1, max_length=120)
+    session_id: str = Field(min_length=1, max_length=120)
+    user_id: str = Field(min_length=1, max_length=120)
+    resume_token_jti: str = Field(min_length=16, max_length=200)
+    session_generation: int = Field(ge=1)
+    issued_at: datetime
+    expires_at: datetime
+    resume_token_consumed_at: datetime | None = None
+
+
 class VoiceEventRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     tenant_id: str
     session_id: str
     event_id: str
+    canonical_event_id: str
     canonical_sequence: int = Field(ge=1)
     source: VoiceEventSource
+    # Legacy compatibility alias. New code should use semantic_operation_id.
     source_event_key: str
+    source_delivery_id: str
+    semantic_operation_id: str
     event_type: str
     session_generation: int = Field(ge=1)
     source_sequence: int | None = Field(default=None, ge=0)
@@ -159,6 +183,8 @@ class VoiceEventAppendRequest(BaseModel):
     session_generation: int = Field(ge=1)
     client_event_id: str | None = Field(default=None, max_length=200)
     provider_event_id: str | None = Field(default=None, max_length=200)
+    source_delivery_id: str | None = Field(default=None, max_length=200)
+    semantic_operation_id: str | None = Field(default=None, max_length=200)
     source_sequence: int | None = Field(default=None, ge=0)
     source_connection_id: str | None = Field(default=None, max_length=200)
     turn_id: str | None = Field(default=None, max_length=120)
@@ -166,6 +192,12 @@ class VoiceEventAppendRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
     def source_event_key(self) -> str:
+        """Legacy semantic key retained for backwards compatibility."""
+        return self.semantic_operation_key()
+
+    def source_delivery_key(self) -> str:
+        if self.source_delivery_id:
+            return self.source_delivery_id
         if self.source == "provider":
             if not self.provider_event_id:
                 raise ValueError("PROVIDER_EVENT_ID_REQUIRED")
@@ -175,6 +207,9 @@ class VoiceEventAppendRequest(BaseModel):
                 raise ValueError("CLIENT_EVENT_ID_REQUIRED")
             return self.client_event_id
         return self.client_event_id or self.provider_event_id or self.event_type
+
+    def semantic_operation_key(self) -> str:
+        return self.semantic_operation_id or self.source_delivery_key()
 
 
 class VoiceTurnCreateRequest(BaseModel):

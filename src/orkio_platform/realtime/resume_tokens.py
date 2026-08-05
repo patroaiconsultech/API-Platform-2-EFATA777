@@ -17,6 +17,8 @@ from orkio_platform.realtime.voice_models import VoiceSessionRecord
 @dataclass(frozen=True, slots=True)
 class VoiceResumeCredential:
     token: str
+    jti: str
+    issued_at: datetime
     expires_at: datetime
 
 
@@ -61,6 +63,7 @@ class VoiceResumeTokenManager:
         secret = self._require_secret()
         issued_at = int(time.time())
         expires_at_epoch = issued_at + self._ttl_seconds
+        jti = secrets.token_urlsafe(16)
         claims = {
             "v": 1,
             "tenant_id": session.tenant_id,
@@ -70,7 +73,7 @@ class VoiceResumeTokenManager:
             "session_generation": session.session_generation,
             "iat": issued_at,
             "exp": expires_at_epoch,
-            "jti": secrets.token_urlsafe(16),
+            "jti": jti,
         }
         payload = json.dumps(
             claims,
@@ -87,6 +90,11 @@ class VoiceResumeTokenManager:
         token = f"{encoded_payload}.{_b64url_encode(signature)}"
         return VoiceResumeCredential(
             token=token,
+            jti=jti,
+            issued_at=datetime.fromtimestamp(
+                issued_at,
+                tz=timezone.utc,
+            ),
             expires_at=datetime.fromtimestamp(
                 expires_at_epoch,
                 tz=timezone.utc,
@@ -144,6 +152,11 @@ class VoiceResumeTokenManager:
             raise ConflictError(
                 "VOICE_RESUME_TOKEN_EXPIRED",
                 "Voice resume token has expired.",
+            )
+        if not isinstance(claims.get("jti"), str) or len(claims["jti"]) < 16:
+            raise ConflictError(
+                "VOICE_RESUME_TOKEN_INVALID",
+                "Voice resume token JTI is invalid.",
             )
 
         required_matches = {

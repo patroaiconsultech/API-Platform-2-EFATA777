@@ -187,6 +187,32 @@ Index(
 )
 
 
+voice_resume_tokens = Table(
+    "voice_resume_tokens",
+    metadata,
+    Column("tenant_id", String(120), primary_key=True),
+    Column("resume_token_jti", String(200), primary_key=True),
+    Column("session_id", String(120), nullable=False),
+    Column("user_id", String(120), nullable=False),
+    Column("session_generation", Integer(), nullable=False),
+    Column("issued_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("resume_token_consumed_at", DateTime(timezone=True)),
+    ForeignKeyConstraint(
+        ["tenant_id", "session_id"],
+        ["voice_sessions.tenant_id", "voice_sessions.session_id"],
+        ondelete="CASCADE",
+        name="fk_voice_resume_tokens_session_tenant",
+    ),
+)
+Index(
+    "ix_voice_resume_tokens_tenant_session_generation",
+    voice_resume_tokens.c.tenant_id,
+    voice_resume_tokens.c.session_id,
+    voice_resume_tokens.c.session_generation,
+)
+
+
 voice_turns = Table(
     "voice_turns",
     metadata,
@@ -242,10 +268,13 @@ voice_events = Table(
     metadata,
     Column("tenant_id", String(120), primary_key=True),
     Column("event_id", String(160), primary_key=True),
+    Column("canonical_event_id", String(160), nullable=False),
     Column("session_id", String(120), nullable=False),
     Column("canonical_sequence", Integer(), nullable=False),
     Column("source", String(40), nullable=False),
     Column("source_event_key", String(200), nullable=False),
+    Column("source_delivery_id", String(200), nullable=False),
+    Column("semantic_operation_id", String(200), nullable=False),
     Column("event_type", String(200), nullable=False),
     Column("session_generation", Integer(), nullable=False),
     Column("source_sequence", Integer()),
@@ -268,10 +297,22 @@ voice_events = Table(
     ),
     UniqueConstraint(
         "tenant_id",
+        "canonical_event_id",
+        name="uq_voice_events_tenant_canonical_event",
+    ),
+    UniqueConstraint(
+        "tenant_id",
         "session_id",
         "source",
-        "source_event_key",
-        name="uq_voice_events_semantic_dedupe",
+        "source_delivery_id",
+        name="uq_voice_events_source_delivery",
+    ),
+    UniqueConstraint(
+        "tenant_id",
+        "session_id",
+        "source",
+        "semantic_operation_id",
+        name="uq_voice_events_semantic_operation",
     ),
 )
 Index(

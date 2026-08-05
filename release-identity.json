@@ -3,5 +3,7 @@
   "display_version": "R0.7.0",
   "release_version": "0.7.0",
   "component": "backend",
-  "channel": "audit-candidate"
+  "channel": "audit-candidate-premium-patch",
+  "patch_level": "premium-identity-1",
+  "migration_head": "005_realtime_voice_premium_identity"
 }

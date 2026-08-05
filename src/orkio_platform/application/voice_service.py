@@ -29,6 +29,7 @@ from orkio_platform.realtime.voice_models import (
     VoiceCloseRequest,
     VoiceEventAppendRequest,
     VoiceEventRecord,
+    VoiceResumeTokenRecord,
     VoiceSessionCreateRequest,
     VoiceSessionRecord,
     VoiceSessionStatusEnvelope,
@@ -111,6 +112,24 @@ class VoiceService:
             payload=payload,
         )
         return event
+
+    def _issue_resume_credential(
+        self,
+        session: VoiceSessionRecord,
+    ) -> VoiceResumeCredential:
+        credential = self.resume_tokens.issue(session)
+        self.store.register_resume_token(
+            VoiceResumeTokenRecord(
+                tenant_id=session.tenant_id,
+                session_id=session.session_id,
+                user_id=session.user_id,
+                resume_token_jti=credential.jti,
+                session_generation=session.session_generation,
+                issued_at=credential.issued_at,
+                expires_at=credential.expires_at,
+            )
+        )
+        return credential
 
     def create_session(
         self,
@@ -228,7 +247,7 @@ class VoiceService:
             principal.tenant_id,
             session_id,
         )
-        credential = self.resume_tokens.issue(current)
+        credential = self._issue_resume_credential(current)
         return VoiceCallAnswer(
             session=current,
             sdp=result.sdp_answer,
@@ -257,11 +276,12 @@ class VoiceService:
                 "Voice session belongs to another user.",
                 status_code=403,
             )
-        self.resume_tokens.verify(
+        claims = self.resume_tokens.verify(
             resume_token,
             current,
             expected_generation=expected_generation,
         )
+        resume_token_jti = str(claims["jti"])
         if current.reconnect_attempts >= (
             self.settings.voice_max_reconnect_attempts
         ):
@@ -274,6 +294,7 @@ class VoiceService:
             session_id,
             expected_generation=expected_generation,
             source_connection_id=source_connection_id,
+            resume_token_jti=resume_token_jti,
         )
         self._append_backend_event(
             resumed,
@@ -290,7 +311,7 @@ class VoiceService:
             principal.tenant_id,
             session_id,
         )
-        return current, self.resume_tokens.issue(current)
+        return current, self._issue_resume_credential(current)
 
     def append_event(
         self,
@@ -309,7 +330,8 @@ class VoiceService:
                 status_code=403,
             )
         try:
-            source_event_key = payload.source_event_key()
+            source_delivery_id = payload.source_delivery_key()
+            semantic_operation_id = payload.semantic_operation_key()
         except ValueError as exc:
             raise DomainError(
                 str(exc),
@@ -320,7 +342,9 @@ class VoiceService:
             tenant_id=principal.tenant_id,
             session_id=session_id,
             source=payload.source,
-            source_event_key=source_event_key,
+            source_event_key=semantic_operation_id,
+            source_delivery_id=source_delivery_id,
+            semantic_operation_id=semantic_operation_id,
             event_type=payload.event_type,
             session_generation=payload.session_generation,
             source_sequence=payload.source_sequence,
@@ -436,8 +460,10 @@ class VoiceService:
         self.store.append_event(
             tenant_id=principal.tenant_id,
             session_id=session_id,
-            source="provider",
-            source_event_key=payload.client_event_id,
+            source="browser",
+            source_event_key=payload.transcript_id,
+            source_delivery_id=payload.client_event_id,
+            semantic_operation_id=payload.transcript_id,
             event_type="voice.transcript.final",
             session_generation=payload.session_generation,
             source_connection_id=session.source_connection_id,
@@ -632,7 +658,15 @@ class VoiceService:
                 tenant_id=principal.tenant_id,
                 session_id=session_id,
                 source="provider",
-                source_event_key=payload.provider_event_id,
+                source_event_key=(
+                    payload.response_id
+                    or f"{turn_id}:voice.turn.failed"
+                ),
+                source_delivery_id=payload.provider_event_id,
+                semantic_operation_id=(
+                    payload.response_id
+                    or f"{turn_id}:voice.turn.failed"
+                ),
                 event_type="voice.turn.failed",
                 session_generation=payload.session_generation,
                 source_connection_id=session.source_connection_id,
@@ -684,7 +718,15 @@ class VoiceService:
             tenant_id=principal.tenant_id,
             session_id=session_id,
             source="provider",
-            source_event_key=payload.provider_event_id,
+            source_event_key=(
+                payload.response_id
+                or f"{turn_id}:{event_type}"
+            ),
+            source_delivery_id=payload.provider_event_id,
+            semantic_operation_id=(
+                payload.response_id
+                or f"{turn_id}:{event_type}"
+            ),
             event_type=event_type,
             session_generation=payload.session_generation,
             source_connection_id=session.source_connection_id,
@@ -729,58 +771,19 @@ class VoiceService:
                 session.provider_call_id
             )
 
-        # The terminal event is appended before the row becomes closed so the
-        # journal remains append-only and enforces no events after close.
-        self.store.append_event(
-            tenant_id=principal.tenant_id,
-            session_id=session_id,
-            source="browser",
-            source_event_key=(
-                f"{session_id}:close:{payload.close_reason}:"
-                f"{payload.expected_session_generation}"
-            ),
-            event_type="voice.session.closing",
-            session_generation=payload.expected_session_generation,
-            source_connection_id=session.source_connection_id,
-            payload={
-                "close_reason": payload.close_reason,
-                "provider_hangup": provider_hangup,
-            },
-        )
-        current = self.store.get_session(
-            principal.tenant_id,
-            session_id,
-        )
-        self.store.append_event(
-            tenant_id=principal.tenant_id,
-            session_id=session_id,
-            source="backend",
-            source_event_key=f"{session_id}:closed",
-            event_type="voice.session.closed",
-            session_generation=current.session_generation,
-            source_connection_id=current.source_connection_id,
-            payload={
-                "close_reason": payload.close_reason,
-                "microphone_released": True,
-                "player_released": True,
-                "last_canonical_sequence": (
-                    current.last_canonical_sequence + 1
-                ),
-                "closed_at": utc_now().isoformat(),
-                "provider_hangup": provider_hangup,
-            },
-        )
-        current = self.store.get_session(
-            principal.tenant_id,
-            session_id,
-        )
+        # Provider hangup is attempted before the database transaction so no
+        # external network call is performed while the session row is locked.
+        # The closing event, closed event and session terminal state are then
+        # committed atomically by the store.
         closed = self.store.close_session(
             principal.tenant_id,
             session_id,
-            expected_generation=current.session_generation,
+            expected_generation=payload.expected_session_generation,
             close_reason=payload.close_reason,
             microphone_released=True,
             player_released=True,
+            provider_hangup=provider_hangup,
+            source_connection_id=session.source_connection_id,
         )
         logger.info(
             "voice_session_closed session_id=%s tenant_id=%s reason=%s",

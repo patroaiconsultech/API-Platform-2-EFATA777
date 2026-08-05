@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from orkio_platform.realtime.voice_models import (
     VoiceAudioReportRequest,
     VoiceCallOfferRequest,
     VoiceCloseRequest,
+    VoiceResumeTokenRecord,
     VoiceSessionCreateRequest,
     VoiceSessionRecord,
     VoiceTurnCreateRequest,
@@ -218,11 +220,22 @@ def test_cross_generation_redelivery_returns_original_event(monkeypatch):
         session_generation=1,
     )
     assert created is True
+    token = VoiceResumeTokenRecord(
+        tenant_id="tenant-a",
+        session_id=session.session_id,
+        user_id="user-a",
+        resume_token_jti="resume-token-jti-0001",
+        session_generation=1,
+        issued_at=session.created_at,
+        expires_at=session.created_at + timedelta(minutes=1),
+    )
+    store.register_resume_token(token)
     resumed = store.resume_session(
         "tenant-a",
         session.session_id,
         expected_generation=1,
         source_connection_id="connection_2",
+        resume_token_jti=token.resume_token_jti,
     )
     duplicate, created = store.append_event(
         tenant_id="tenant-a",
@@ -517,6 +530,125 @@ def test_close_requires_released_media_and_is_terminal(monkeypatch):
     ]
     assert len(terminal) == 1
     assert terminal[0].payload["close_reason"] == "user_end"
+
+
+def test_transcript_final_uses_browser_provenance_and_split_identity(
+    monkeypatch,
+):
+    voice, _, store, _, principal, thread = build_service(monkeypatch)
+    session = voice.create_session(
+        principal,
+        VoiceSessionCreateRequest(
+            thread_id=thread.thread_id,
+            consent_granted=True,
+        ),
+    )
+    voice.create_call(
+        principal,
+        session.session_id,
+        VoiceCallOfferRequest(
+            sdp="v=0\\r\\noffer",
+            source_connection_id="connection_identity",
+            expected_session_generation=1,
+        ),
+    )
+    voice.complete_turn(
+        principal,
+        session.session_id,
+        VoiceTurnCreateRequest(
+            transcript_id="semantic-transcript-1",
+            transcript="Efatà 777",
+            client_event_id="browser-delivery-1",
+            session_generation=1,
+        ),
+    )
+    transcript_event = next(
+        event
+        for event in store.list_events("tenant-a", session.session_id)
+        if event.event_type == "voice.transcript.final"
+    )
+    assert transcript_event.source == "browser"
+    assert transcript_event.semantic_operation_id == "semantic-transcript-1"
+    assert transcript_event.source_delivery_id == "browser-delivery-1"
+    assert transcript_event.canonical_event_id == transcript_event.event_id
+
+
+def test_resume_token_jti_is_consumed_exactly_once(monkeypatch):
+    _, _, store, _, _, _ = build_service(monkeypatch)
+    session = VoiceSessionRecord(
+        tenant_id="tenant-a",
+        session_id="voice_session_resume_once",
+        thread_id="thread_resume_once",
+        user_id="user-a",
+        provider="openai_realtime",
+    )
+    store.create_session(session)
+    token = VoiceResumeTokenRecord(
+        tenant_id=session.tenant_id,
+        session_id=session.session_id,
+        user_id=session.user_id,
+        resume_token_jti="resume-token-jti-once",
+        session_generation=1,
+        issued_at=session.created_at,
+        expires_at=session.created_at + timedelta(minutes=1),
+    )
+    store.register_resume_token(token)
+    store.resume_session(
+        session.tenant_id,
+        session.session_id,
+        expected_generation=1,
+        source_connection_id="connection_once_1",
+        resume_token_jti=token.resume_token_jti,
+    )
+    with pytest.raises(
+        ConflictError,
+        match="already been consumed",
+    ):
+        store.resume_session(
+            session.tenant_id,
+            session.session_id,
+            expected_generation=1,
+            source_connection_id="connection_once_2",
+            resume_token_jti=token.resume_token_jti,
+        )
+
+
+def test_semantic_operation_deduplicates_new_delivery_after_reconnect(
+    monkeypatch,
+):
+    _, _, store, _, _, _ = build_service(monkeypatch)
+    session = VoiceSessionRecord(
+        tenant_id="tenant-a",
+        session_id="voice_session_semantic",
+        thread_id="thread_semantic",
+        user_id="user-a",
+        provider="openai_realtime",
+    )
+    store.create_session(session)
+    first, created = store.append_event(
+        tenant_id=session.tenant_id,
+        session_id=session.session_id,
+        source="browser",
+        source_event_key="semantic-operation-1",
+        source_delivery_id="delivery-1",
+        semantic_operation_id="semantic-operation-1",
+        event_type="voice.transcript.final",
+        session_generation=1,
+    )
+    assert created is True
+    duplicate, created = store.append_event(
+        tenant_id=session.tenant_id,
+        session_id=session.session_id,
+        source="browser",
+        source_event_key="semantic-operation-1",
+        source_delivery_id="delivery-2",
+        semantic_operation_id="semantic-operation-1",
+        event_type="voice.transcript.final",
+        session_generation=1,
+    )
+    assert created is False
+    assert duplicate.canonical_event_id == first.canonical_event_id
+    assert duplicate.source_delivery_id == "delivery-1"
 
 
 def test_openai_provider_keeps_primary_key_server_side(monkeypatch):
